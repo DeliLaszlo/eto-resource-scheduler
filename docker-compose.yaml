@@ -1,0 +1,86 @@
+name: etofc
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?A POSTGRES_USER nincs megadva a .env fájlban}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?A POSTGRES_PASSWORD nincs megadva a .env fájlban}
+      POSTGRES_DB: ${POSTGRES_DB:?A POSTGRES_DB nincs megadva a .env fájlban}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  backend:
+    image: ghcr.io/delilaszlo/eto-backend:${APP_VERSION:?Az APP_VERSION nincs megadva a .env fájlban}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    environment:
+      NODE_ENV: production
+      PORT: 8000
+      FRONTEND_URL: ${FRONTEND_URL:?A FRONTEND_URL nincs megadva a .env fájlban}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:?A TRUST_PROXY_HOPS nincs megadva a .env fájlban}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?A JWT_SECRET nincs megadva a .env fájlban}
+      OUTLOOK_STATE_SECRET: ${OUTLOOK_STATE_SECRET:?Az OUTLOOK_STATE_SECRET nincs megadva a .env fájlban}
+      OUTLOOK_TOKEN_ENCRYPTION_KEY: ${OUTLOOK_TOKEN_ENCRYPTION_KEY:?Az OUTLOOK_TOKEN_ENCRYPTION_KEY nincs megadva a .env fájlban}
+      TWO_FACTOR_ENCRYPTION_KEY: ${TWO_FACTOR_ENCRYPTION_KEY:?A TWO_FACTOR_ENCRYPTION_KEY nincs megadva a .env fájlban}
+      SMTP_HOST: ${SMTP_HOST:?Az SMTP_HOST nincs megadva a .env fájlban}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:?Az EMAIL_FROM_ADDRESS nincs megadva a .env fájlban}
+      MAINTAINER_EMAIL: ${MAINTAINER_EMAIL:?A MAINTAINER_EMAIL nincs megadva a .env fájlban}
+      CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      EMAIL_SINGLE_RECIPIENT: "false"
+      SCHEDULER_ENABLED: "true"
+    stop_grace_period: 20s
+    logging: *logging
+
+  backup:
+    image: ghcr.io/delilaszlo/eto-backup:${APP_VERSION:?Az APP_VERSION nincs megadva a .env fájlban}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?A BACKUP_ENCRYPTION_KEY nincs megadva a .env fájlban}
+      BACKUP_DIR: /backups
+      BACKUP_KEEP: "14"
+      BACKUP_CRON: "0 1 * * *"
+    volumes:
+      - ./backups:/backups
+    logging: *logging
+
+  frontend:
+    image: ghcr.io/delilaszlo/eto-frontend:${APP_VERSION:?Az APP_VERSION nincs megadva a .env fájlban}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_UPSTREAM: backend:8000
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-3000}:80"
+    logging: *logging
+
+volumes:
+  pg_data:

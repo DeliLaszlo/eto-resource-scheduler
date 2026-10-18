@@ -1,0 +1,8 @@
+# Az eto.example.hu helyére a valódi cím, a 3000 helyére a .env HTTP_PORT értéke
+eto.example.hu {
+	request_body {
+		max_size 10MB
+	}
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:3000
+}
