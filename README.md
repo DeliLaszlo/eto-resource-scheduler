@@ -1,329 +1,248 @@
-# ETO FC Heti Program: operations runbook
+# ETO FC Heti Program operations guide
 
-Magyarul: [README.hu.md](README.hu.md).
+[Magyar nyelvű változat](README.hu.md)
 
-ETO FC Heti Program is the weekly schedule and resource management web app of the football club ETO FC: trainings, matches, pitches, rooms, the dormitory and the weekly program. This is its installation kit, everything a server needs to run it. It contains no source code: the app ships as container images on GitHub Container Registry (`ghcr.io/delilaszlo/eto-backend`, `eto-frontend` and `eto-backup`).
-
-The public repository [eto-resource-scheduler](https://github.com/delilaszlo/eto-resource-scheduler) is published automatically from the private source repository, so changes made there directly get overwritten. Each version tag (`v1.0.0`) matches the image version of the same number. License: MIT, see [LICENSE](LICENSE).
-
-| File | Purpose |
-| --- | --- |
-| `docker-compose.yaml` | The four services: database, backend, nightly backup, web server |
-| `setup.sh` | Writes `.env` once: asks for the outside values and generates every secret |
-| `update.sh` | Moves to a new version: backup, restart, health check |
-| `proxy/` | HTTPS proxy examples for Caddy and nginx |
+ETO FC Heti Program is the weekly schedule web app of the ETO FC football club. This kit installs it on a server with Docker. The steps start from a freshly installed, empty server. After the installation, most of the operation happens in the operator console at `https://<address>/console`. The license is MIT, see [LICENSE](LICENSE).
 
 ## 1. Requirements
 
-**Server**
-- Linux on x86-64, 2 vCPU, 4 GB RAM, 20 GB free disk.
-- Docker Engine with Compose v2 (`docker compose version` works). Compose 2.33 and 5.6 are tested.
-- The clock must be synchronized, because two-step login codes are time-based. Check that `timedatectl` shows `System clock synchronized: yes`.
+- An x86-64 server with Ubuntu 22.04, 24.04 or Debian 12, 13.
+- At least 2 CPU cores, 4 GB RAM and 20 GB free disk.
+- A domain name, such as `eto.example.hu`. Its DNS record has to point to the server before the installation.
+- An SMTP mail account.
+- Recommended. SSH set up before the installation, with key login and password login turned off.
+- Optional. A Microsoft Entra app registration for the Outlook sync, and an S3-compatible storage for the cloud backups.
 
-Measured on a 2 vCPU, 4 GB server: 40 simultaneous users kept the load average under 1 and the whole server under 800 MB of memory, with API answers under 120 ms for 95% of requests. The first PDF starts a Chromium that stays in memory, after which the backend uses about 0.5 GB, up to 0.6 GB while rendering. Disk use is mostly images: about 5 GB while two versions are kept (section 5).
+## 2. Installation
 
-**Network**
-- Docker creates its internal networks in `172.17.0.0/16` to `172.31.0.0/16` and `192.168.0.0/16`. If the local network uses any of these, set `default-address-pools` in `/etc/docker/daemon.json` before the first start, or the server can lose contact with that part of the network.
-- Outbound access, directly (the app does not support an outbound HTTP proxy):
-  - the SMTP server and its port;
-  - `ghcr.io` and `registry-1.docker.io` (images);
-  - `adatbank.mlsz.hu` (match schedules);
-  - `login.microsoftonline.com` and `graph.microsoft.com` (only with Outlook).
-- Many hosting providers block outgoing ports 587 and 465. Test before choosing the SMTP port:
-  ```bash
-  nc -vz -w 5 <smtp-host> 587
-  ```
-  A timeout means the port is blocked. Most mail services also accept another port, such as 2525.
-
-**Mail service**
-- The sender address's domain must authorize the service in DNS (SPF, DKIM and DMARC), or the weekly programme lands in spam.
-- The service must not rewrite links (click tracking), add tracking images or add an unsubscribe header. A rewritten link looks like phishing to spam filters. A staff member who clicks an unsubscribe link is silently blocked by the service and stops receiving the weekly programme.
-- Before going live, send a test to a Gmail and an Outlook.com address. A new sender domain often lands in Junk at Microsoft even when every check passes.
-
-**HTTPS proxy in front**
-
-The app serves plain HTTP on one port of the server. An HTTPS proxy must sit in front of it, and the app needs a hostname of its own (`eto.example.hu`, not `example.hu/eto/`). The proxy must:
-- serve HTTPS only and redirect HTTP to HTTPS;
-- forward the whole hostname to the app's port;
-- allow request bodies up to 10 MB;
-- not buffer `text/event-stream` responses (the progress of a week's finalization);
-- allow a read timeout of at least 60 seconds;
-- set `X-Forwarded-For`.
-
-Working examples are in `proxy/Caddyfile.example` and `proxy/nginx.conf.example`. A `Strict-Transport-Security` header is recommended and is in both.
-
-**Firewall.** A port that Docker publishes bypasses `ufw`. When the proxy runs on the same machine, `setup.sh` binds the app to `127.0.0.1` and nothing else can reach it. When the proxy runs on another machine, the app listens on the network, so restrict its port to the proxy's address in the cloud or network firewall, or in the `DOCKER-USER` iptables chain.
-
-## 2. Install
-
-Copy this folder to the server, for example to `/opt/etofc`, and work in it. From the machine that has the folder (Linux, macOS or Windows PowerShell):
 ```bash
-scp -r deploy <user>@<server>:~/etofc
-ssh <user>@<server> "sudo mv ~/etofc /opt/etofc"
-```
-Or clone the public repository on the server and check out the version to install:
-```bash
+sudo apt update && sudo apt install -y git
 sudo git clone https://github.com/delilaszlo/eto-resource-scheduler.git /opt/etofc
-sudo chown -R $USER: /opt/etofc
-cd /opt/etofc && git checkout v1.0.0
-```
-The commands below assume the user is in the `docker` group. Otherwise put `sudo` before each `docker` and `sh` command.
-
-1. If the images are private, log in once with a GitHub token that has only the `read:packages` scope:
-   ```bash
-   docker login ghcr.io -u <github-user>
-   ```
-2. Write the configuration. The argument is the version to install:
-   ```bash
-   sh setup.sh 1.0.0
-   ```
-   It asks for:
-   - the public address;
-   - how many HTTPS proxies stand in front, and whether the nearest one runs on this machine;
-   - the SMTP server, port, user and password, and the sender address;
-   - the maintainer's e-mail address;
-   - the Outlook values (optional, see section 4);
-   - the app's name.
-
-   It generates every secret and writes `.env` readable by its owner only. **At the end it prints two keys. Store them outside the server now, in two places** (a password manager, a sealed envelope). Without `BACKUP_ENCRYPTION_KEY` no backup can be restored. Without `TWO_FACTOR_ENCRYPTION_KEY` nobody with two-step login can log in. Better still, keep a copy of the whole `.env`.
-
-   `setup.sh` refuses to run when `.env` already exists, because new keys would make the existing backups and two-step logins unusable.
-3. Start:
-   ```bash
-   docker compose pull
-   docker compose up -d
-   docker compose ps
-   ```
-   The backend creates the database tables on its first start. After about a minute all four services are up, and `db` and `backend` show `healthy`.
-4. Check from the server itself (use the port given to `setup.sh`):
-   ```bash
-   curl http://127.0.0.1:3000/health
-   ```
-   The answer is `{"status":"ok"}`.
-5. Configure the HTTPS proxy, then open the public address in a browser. The login page appears. Nobody can log in yet.
-
-Every service restarts by itself after a crash or a reboot.
-
-## 3. First data and going live
-
-Installing sends no e-mail. The steps below send mail only to the person doing the checks.
-
-**3.1 Starting data, once.** The club's starting data (administrator, staff, teams, rooms) comes in a file named `seed-data.json`. It contains names, e-mail addresses and the administrator's one-time password, so it travels only over SSH (`scp`), never by e-mail or chat.
-
-To write one from scratch, start from the example in the image, then replace every value, above all the administrator's address and password:
-```bash
-docker compose run --rm -T --no-deps --entrypoint cat backend prisma/seed-data.example.json > seed-data.json
+cd /opt/etofc
+sudo sh setup.sh
 ```
 
-```bash
-chmod 644 seed-data.json
-docker compose run --rm -v "$PWD/seed-data.json:/app/backend/prisma/seed-data.json:ro" backend npm run db:seed
-rm seed-data.json
-```
+The script installs the newest version. A specific version is installed by adding its number, such as `sudo sh setup.sh 1.0.0`.
 
-Use `$PWD` exactly as written. Older Compose versions turn a relative path here into an empty volume. Without the file, the command stops and prints the mount it needs. The data now lives in the database and its backups.
+The script asks the following questions in Hungarian. A value in square brackets is the default, which Enter accepts.
 
-A wrong file can be fixed by emptying the database and seeding again, but only before anything real has been entered:
-```bash
-docker compose down
-docker volume rm etofc_pg_data
-docker compose up -d
-```
+| Question | Example answer | Note |
+| --- | --- | --- |
+| Docker is not installed. Install it from Docker's official repository | `i` | Only when Docker is missing |
+| curl is not installed. Install it | `i` | Only when curl is missing |
+| Continue anyway | `n` | Only after a clock or network warning. The warning names the fix |
+| Are you restoring a backup of an earlier installation (moving to a new server) | `n` | `i` only when moving, see section 5 |
+| The public address of the app, for example https://eto.example.hu | `https://eto.example.hu` | |
+| This server serves HTTPS with the built-in Caddy (no if there is already an own HTTPS proxy) | `i` | With `n`, the questions of the next table follow |
+| How many CDNs stand in front of the server (for example 1 with Cloudflare, 0 if none) | `0` | |
+| The name of the app | Enter | Default `ETO FC Heti Program`. It appears in the e-mail subjects |
+| The operator's e-mail address (console login and notifications) | `uzemelteto@example.hu` | |
+| The operator's password (at least 12 characters), then again | | Hidden while typing |
+| User `admin` may manage the containers without sudo (docker group) | `i` | Only when run with sudo. Takes effect at the user's next login |
+| The ufw firewall is not installed. Install and set it up | `i` | Only when ufw is missing |
+| The SSH port(s), separated by spaces | Enter | The default is the port the SSH server listens on |
+| Turn on the firewall with only these ports open (22 80 443) | `i` | |
 
-**3.2 Checks.** These mail nobody on the staff list. Do not finalize a week and do not invite staff.
-- `https://<address>/health` answers `{"status":"ok"}`, and `http://<address>` redirects to HTTPS.
-- The administrator logs in with the one-time password, changes it and sets up two-step login.
-- E-mail: the administrator invites the checker's own address from the Users page. The mail arrives, and its link opens the public address. Then the administrator deletes that invitation unused.
-- PDF: the Planner's print preview renders.
-- Outbound access, from the backend container:
-  ```bash
-  docker compose exec backend node -e "fetch('https://adatbank.mlsz.hu').then(r => console.log(r.status))"
-  ```
-- Backups: the next morning a new file is in `backups/`, and it opens with the offline copy of the key (section 6.4).
+With an own HTTPS proxy in front of the app, these questions come instead of the CDN question.
 
-**3.3 Going live (the club's administrator).** Upload the dormitory floor plan, set the planners' permissions, then invite the staff who will use the app from the Users page. Staff who only need the weekly PDF are never invited: they get it anyway. An unused invitation expires after 7 days and can be resent. The first real finalization mails the weekly PDF to everyone.
+| Question | Example answer | Note |
+| --- | --- | --- |
+| How many proxies stand in front of the app, the own HTTPS proxy included (for example 1, or 2 with Cloudflare) | `1` | |
+| Which port the app listens on for the own proxy | `3000` | |
+| The own HTTPS proxy runs on this machine | `i` | |
+| Which address of this machine the proxy uses (0.0.0.0 = every address) | `10.0.0.5` | Only after `n` to the previous question |
 
-## 4. Outlook
+At the end the script prints `BACKUP_ENCRYPTION_KEY` and `TWO_FACTOR_ENCRYPTION_KEY`. They are in `.env` as well. If the server or `.env` is lost, a backup can only be restored with these two keys, so they have to be stored outside the server too, for example in a password manager.
 
-Outlook calendar sync is off while the Outlook values in `.env` are empty. The rest of the app works normally, and administrators see on their profile that the integration is not set up.
+If the script stops halfway, it can be run again after the fix. It continues where it stopped and keeps the keys.
 
-**4.1 Turning it on**
-1. In the Microsoft Entra admin center, register an application (or use an existing one):
-   - account type: this organization only;
-   - redirect URI, platform Web: `https://<address>/api/integrations/outlook/callback`;
-   - delegated Microsoft Graph permissions: `offline_access`, `User.Read`, `Calendars.ReadWrite`.
+## 3. First steps in the console
 
-   Create a client secret and **note its expiry date**.
-2. Fill in these lines in `.env` (a minimal server may have no editor: `sudo apt install -y nano`, then `nano .env`):
-   ```
-   OUTLOOK_CLIENT_ID=<application (client) ID>
-   OUTLOOK_CLIENT_SECRET='<client secret value>'
-   OUTLOOK_CLIENT_SECRET_EXPIRES=2028-10-15
-   OUTLOOK_TENANT_ID=<directory (tenant) ID>
-   ```
-   `OUTLOOK_REDIRECT_URI` was already written by `setup.sh`. The backend refuses to start if the ID and secret are set without a valid expiry date.
-3. Apply it:
-   ```bash
-   docker compose up -d
-   ```
-   Only the backend is recreated, and the app is unavailable for 10 to 20 seconds. Users stay logged in. Do not use `docker compose restart`: it does not read `.env` again. This holds for every `.env` change.
+The console is at `https://<address>/console`, with the operator's e-mail address and password. The first login sets up two-step login with an authenticator app. The Overview page then lists the missing settings. The off-site copy of the backups is described in section 4.
 
-Turning it off is the reverse: empty the ID and secret, then `docker compose up -d`. Existing connections are kept and work again once it is turned back on.
+### Mail
 
-**4.2 The client secret expires.** The portal allows at most 24 months. The maintainer address gets an e-mail 30, 7 and 1 days before `OUTLOOK_CLIENT_SECRET_EXPIRES`. To rotate:
-1. Create a new client secret in the same app registration and note its expiry date.
-2. Put the new value in `OUTLOOK_CLIENT_SECRET` and the new date in `OUTLOOK_CLIENT_SECRET_EXPIRES`.
-3. Run `docker compose up -d`.
-4. Delete the old secret in the portal.
+The mail settings are under Settings, Mail. Until they are set, the app sends no e-mail. Before saving, a test mail goes to the operator's address.
 
-If the secret does expire, sync stops. The nightly check then e-mails the maintainer. Rotating the secret is enough: users do not reconnect.
+| Field | Example | Note |
+| --- | --- | --- |
+| SMTP server | `smtp.example.hu` | Given by the mail provider |
+| Port | `587` | Given by the mail provider |
+| Username | `heti@example.hu` | Empty if the server needs no login |
+| Password | | The mail account's password |
+| Sender address | `heti@example.hu` | The mail provider has to allow sending from it |
+| Sender name | `ETO FC Heti Program` | |
 
-## 5. Updates
+### Starting data
+
+The card on the Overview page offers an example file. The filled file is uploaded on the same card, once, while the club has no users. Before saving, a preview shows the problems.
+
+`seededUsers` log in with the password given in the file. `invitedUsers` are invited by the club's admins. After the passwords are sent out, the file has to be deleted.
+
+### Outlook
+
+The Outlook settings are under Settings, Outlook. The Outlook sync needs an app registration. The registration is made in the Microsoft Entra admin center (`entra.microsoft.com`) with these steps.
+
+1. App registrations, New registration.
+2. Name `ETO FC Heti Program`. Supported account types "Accounts in any organizational directory and personal Microsoft accounts" if any Microsoft account may connect. "Accounts in this organizational directory only" if only the accounts of one organization may.
+3. Redirect URI with platform Web. The value is the console's Redirect URI field, such as `https://eto.example.hu/api/integrations/outlook/callback`.
+4. API permissions, Add a permission, Microsoft Graph, Delegated permissions. `offline_access`, `User.Read` and `Calendars.ReadWrite` have to be added.
+5. Certificates & secrets, New client secret. The expiry can be at most 24 months. The secret's Value is shown only once.
+
+| Field | Example | Note |
+| --- | --- | --- |
+| Application ID | `0f3c9a2e-5b1d-4c7e-9a8f-2d6b4e1c7a90` | Application (client) ID on the app's Overview page |
+| Tenant ID | `common` | `common` if any Microsoft account may connect. If only the accounts of one organization may, the Directory (tenant) ID from the app's Overview page |
+| Client secret | | The Value of the new secret, not its Secret ID |
+| Secret expiry | `2028-11-01` | The expiry date of the secret |
+
+Before saving, the console checks the ID and the secret with Azure. The console sends an e-mail before the secret expires. A new secret is made with step 5 and entered in the same two fields.
+
+## 4. Backups
+
+The database is backed up every night at 02:00 Hungarian time, or 03:00 in summer time. The backups are encrypted with `BACKUP_ENCRYPTION_KEY`. The server keeps them for 14 days, at most 21 at a time. The Backups page of the console can make a backup on demand, and every backup can be downloaded there.
+
+### Off-site copy
+
+A backup on the server is lost with the server. So at 03:40 every night the console uploads the new backups to an S3-compatible storage, at most 14 in a week. The settings are under Settings, Off-site copy. The example here is Backblaze B2, because its first 10 GB are free, and that is enough for the club's backups.
+
+The Backblaze B2 storage is set up with these steps.
+
+1. Sign up at `backblaze.com` with region EU Central. The region can only be chosen at sign-up, and it keeps the club's data in the EU.
+2. Buckets, Create a Bucket. A unique name such as `eto-mentesek`, Files in Bucket Private, Object Lock Enable.
+3. The bucket's Object Lock setting, default retention 7 days. Nobody can delete a backup for a week, not even with a stolen key.
+4. The bucket's Lifecycle Settings, custom rule. Days till hide 8, days till delete 1. Old backups do not pile up after the lock expires.
+5. Application Keys, Add a New Application Key. Access to this bucket only, type of access Write Only. The server can upload but cannot delete. Backblaze shows the key only once.
+
+| Field | Example | Note |
+| --- | --- | --- |
+| S3 endpoint | `https://s3.eu-central-003.backblazeb2.com` | The Endpoint shown in the bucket list, with `https://` in front |
+| Region | `eu-central-003` | The middle part of the endpoint |
+| Bucket name | `eto-mentesek` | |
+| Folder in the bucket | `etofc` | Optional. Empty uploads to the bucket's root |
+| Key ID | `0031a2b3c4d5e6f0000000001` | The keyID of the new key |
+| Secret key | | The applicationKey of the new key |
+
+Before saving, the console uploads a test file to the bucket.
+
+### Restoring a backup
+
+A backup is restored on the server with four commands. The Backups page shows them for every backup, with its file name.
 
 ```bash
-sh update.sh 1.0.1
+cd /opt/etofc
+sudo docker compose stop backend
+sudo docker compose exec -T backup sh /backup.sh restore etofc-20261107T010000Z.dump.age
+sudo docker compose up -d --wait
 ```
-If the folder is a clone of the public repository, check out the same version first, so the kit files match the images:
+
+The restore goes into a separate database first. A failed restore leaves the current data untouched.
+
+## 5. Moving to a new server
+
+A move needs the newest backup and the two saved keys. The backup can be downloaded from the S3 bucket or from the old console. The domain's DNS record has to point to the new server before the installation.
+
+The backup is first copied onto the new server. From there it goes into the kit's `backups` folder before the installation, which otherwise uses the commands of section 2.
+
 ```bash
-git fetch --tags && git checkout v1.0.1
+sudo apt update && sudo apt install -y git
+sudo git clone https://github.com/delilaszlo/eto-resource-scheduler.git /opt/etofc
+sudo mkdir /opt/etofc/backups
+sudo cp ~/etofc-*.dump.age /opt/etofc/backups/
+cd /opt/etofc
+sudo sh setup.sh
 ```
 
-It asks for confirmation, then:
-1. downloads the new version's images, unless they are already on the server;
-2. takes a backup;
-3. restarts on the new version and waits until every service is healthy;
-4. deletes images older than the previous version;
-5. prints the exact rollback commands.
+Compared with section 2, these questions differ.
 
-Database migrations run by themselves when the new backend starts. An update downloads about 650 MB. The previous version's images stay on the server for a rollback until the next update.
+| Question | Example answer | Note |
+| --- | --- | --- |
+| Are you restoring a backup of an earlier installation (moving to a new server) | `i` | |
+| `BACKUP_ENCRYPTION_KEY` | `AGE-SECRET-KEY-1…` | The saved key, hidden while typing |
+| `TWO_FACTOR_ENCRYPTION_KEY` | 64 hexadecimal characters | The saved key, hidden while typing |
 
-**When not to update**
-- While someone is finalizing a week: the finalization runs in the backend's memory and a restart loses it.
-- Between 01:45 and 04:00, Hungarian time: the nightly backup and jobs run then.
+The operator's e-mail address and password are not asked, because the operator account comes back with the backup. After the start, the script restores the newest backup of the `backups` folder. The console settings come back with it.
 
-**Rollback.** Migrations cannot be undone, so going back means the previous version plus the backup taken just before the update. `update.sh` prints these commands with the version and the file filled in:
+The new `.env` gets a new `JWT_SECRET` and a new `OUTLOOK_TOKEN_ENCRYPTION_KEY`. So everybody has to log in again, and the users who connected Outlook have to connect it again. If the old `.env` survived, it can be copied into `/opt/etofc` before `setup.sh`, and then none of this is needed. The script then asks whether to restore the newest backup, and the answer is `i`.
+
+An old server that still runs has to be shut down, otherwise both servers send the e-mails.
+
+## 6. Updating
+
 ```bash
-sed -i 's/^APP_VERSION=.*/APP_VERSION=1.0.0/' .env
-docker compose stop backend
-docker compose exec -T backup sh /backup.sh restore etofc-20261015T164549Z.dump.age
-docker compose up -d
+cd /opt/etofc
+sudo sh update.sh X.Y.Z
 ```
-Anything entered after the update is lost.
 
-**Security updates.** The images carry their own operating system, Node.js, Chromium, nginx and PostgreSQL. Every release is built on the current base images, so installing a release patches them; when only a base image has a fix, a release of the same code is enough. Update the server's own packages with the distribution's usual tools.
+`X.Y.Z` is a released version number, such as `1.2.0`. The versions are listed on [GitHub](https://github.com/delilaszlo/eto-resource-scheduler/tags). The console's Status page shows the newest one, and the operator gets an e-mail about every new version.
 
-## 6. Backups
+The script makes a backup, then starts the new version and waits until it is ready. If the new version does not start, the script prints the commands that return to the old version and its backup. No update should run while somebody is finalizing a week, or between 01:45 and 04:00 Hungarian time, when the nightly jobs run.
 
-**6.1 Schedule.** The `backup` service dumps the database every night at 01:00 UTC into `backups/`, encrypted with `BACKUP_ENCRYPTION_KEY`, and keeps the 14 newest files. Encrypted files are safe to copy anywhere. The files belong to `root`: anyone can read and copy them, but deleting one by hand needs `sudo`.
+## 7. Troubleshooting
 
-**6.2 Off the server.** A backup on the same disk does not survive the loss of the server. Copy `backups/` elsewhere every day, for example from another machine:
+### During the installation
+
+| Problem | Cause | Solution |
+| --- | --- | --- |
+| The address does not answer yet | The DNS record does not point to the server, or the hosting provider blocks ports 80 and 443 | Fix the DNS record or the ports, then run `setup.sh` again. The proxy log shows the details |
+| The services did not start | Usually a wrong value in `.env` | The backend log names the problem |
+| A download failed | The server cannot reach `ghcr.io` or `download.docker.com` | Allow outgoing HTTPS on the server |
+
+The logs are shown by these commands.
+
 ```bash
-rsync -a etofc-server:/opt/etofc/backups/ /srv/etofc-backups/
+cd /opt/etofc
+sudo docker compose logs proxy
+sudo docker compose logs backend
 ```
 
-**6.3 Manual backup**
+### During operation
+
+Errors of the running app are on the console's System log page.
+
+| Problem | Cause | Solution |
+| --- | --- | --- |
+| No e-mails arrive | A wrong mail setting, or the hosting provider blocks port 587 | The Status page shows the last mail error. Another port of the mail provider, such as 2525, can help |
+| The e-mails land in spam | The sender's domain has no SPF, DKIM or DMARC record | Add the mail provider's records to the domain |
+| Every login fails with a 403 error | `FRONTEND_URL` in `.env` differs from the address in the browser | Correct `FRONTEND_URL` |
+| Everybody gets a "Túl sok kérés" error | The club's network shares one address | Raise the limit in Settings, Rate limit |
+| The Outlook sync stopped | The Azure secret expired | Make a new secret in the Entra admin center and enter it, see section 3 |
+| A club admin lost their phone or password | | Club admins, Recover. The admin gets a password reset link |
+| The operator lost their phone | | The "Nem tudsz bejelentkezni?" link on the login page sends an e-mail that turns off two-step login |
+| The operator lost both password and phone | | The command below |
+
+This command sets a new operator password and turns off two-step login. It asks for the new password twice.
+
 ```bash
-docker compose exec -T backup sh /backup.sh dump
+cd /opt/etofc
+sudo docker compose exec backend node dist/src/cli/operator.js reset
 ```
 
-**6.4 Checking a backup without restoring it.** Run this where the copied backups are, for example on the machine that holds the off-server copy. It needs the backup image, so log in to `ghcr.io` there first if the images are private. Put the offline copy of the key (the `AGE-SECRET-KEY-...` text alone) in a file, then:
+## 8. The .env file
+
+`setup.sh` writes the server's settings and secrets into `/opt/etofc/.env`. Only its owner can read it. After a change, `sudo docker compose up -d` restarts the app with the new values.
+
+| Value | Purpose | Example | Change |
+| --- | --- | --- | --- |
+| `APP_VERSION` | The running version | `1.2.0` | Only through `update.sh` |
+| `APP_NAME` | The app's name in the e-mails | `'ETO FC Heti Program'` | Any time |
+| `FRONTEND_URL` | The public address | `https://eto.example.hu` | The DNS record and the Azure redirect URI have to change too |
+| `TRUST_PROXY_HOPS` | How many proxies a request passes before the backend. The backend finds the visitor's address with it, for the rate limit | `2` with Caddy, `3` with Caddy and Cloudflare, `2` with one own proxy | Adding a CDN raises it by one, removing it lowers it by one |
+| `HTTP_BIND`, `HTTP_PORT` | The address and port the app listens on for an own proxy | `127.0.0.1`, `3000` | The own proxy has to forward to the new address too |
+| `COMPOSE_PROFILES` | `https` runs the built-in Caddy. Empty means an own proxy | `https` | A switch changes `TRUST_PROXY_HOPS` too |
+| `CADDY_TRUSTED_PROXIES` | Where Caddy accepts the visitor's address from | `'127.0.0.1/32'` without CDN, `'0.0.0.0/0 ::/0'` with CDN | Changes together with `TRUST_PROXY_HOPS` when a CDN is added or removed |
+| `JWT_SECRET` | Signs the logins | 96 hexadecimal characters | Possible, but everybody is logged out, the operator too |
+| `OUTLOOK_STATE_SECRET` | Signs an Outlook connection in progress, valid for 10 minutes | 96 hexadecimal characters | Possible. Only a connection started in the last 10 minutes fails |
+| `OUTLOOK_TOKEN_ENCRYPTION_KEY` | Encrypts the Outlook connections | 64 hexadecimal characters | Possible, but every user has to connect Outlook again |
+| `TWO_FACTOR_ENCRYPTION_KEY` | Encrypts the two-step logins and the console settings | 64 hexadecimal characters | **Never.** The two-step logins and the console settings are lost |
+| `BACKUP_ENCRYPTION_KEY` | Encrypts the backups | `AGE-SECRET-KEY-1…` | Possible. The old backups still need the old key |
+| `POSTGRES_USER`, `POSTGRES_DB` | The database's user and name | `eto`, `etofc` | Never |
+| `POSTGRES_PASSWORD` | The database's password | 48 hexadecimal characters | In the database first, see below |
+
+The database password changes in three steps. The first command sets it in the database. Then the same password goes into `POSTGRES_PASSWORD` in `.env`. The second command restarts the app.
+
 ```bash
-docker run --rm -i -v "$PWD/backups:/backups:ro" --entrypoint sh ghcr.io/delilaszlo/eto-backup:<version> \
-  -c 'cat > /tmp/key && age -d -i /tmp/key /backups/<file> | pg_restore --list > /dev/null && echo OK' < key.txt
-rm key.txt
+cd /opt/etofc
+sudo docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD 'UJ_JELSZO'"
+sudo docker compose up -d
 ```
-It prints `OK`. A wrong key fails with "no identity matched". On Windows PowerShell, which has no `<`, copy the key to the clipboard and pipe it in instead:
-```powershell
-Get-Clipboard | docker run --rm -i -v "${PWD}/backups:/backups:ro" --entrypoint sh ghcr.io/delilaszlo/eto-backup:<version> -c 'cat > /tmp/key && age -d -i /tmp/key /backups/<file> | pg_restore --list > /dev/null && echo OK'
-```
-
-**6.5 Restore**
-```bash
-docker compose stop backend
-docker compose exec -T backup sh /backup.sh restore <file>
-docker compose up -d
-```
-`restore` refuses while the backend is running. It restores into a separate database and swaps it in only on success, so a failed restore leaves the current data untouched.
-
-**6.6 On a new server.** Copy the old `.env`, do not run `setup.sh`: the same keys are needed for the backups, two-step logins and Outlook connections. Then:
-1. Copy the backup file into `backups/`.
-2. Run `docker compose up -d`.
-3. Restore as in 6.5.
-
-**6.7 Rehearsing a restore on the same server.** A second copy of this folder is the same installation unless it gets its own project name, and its `up` would attach to the live database. So:
-1. Copy the folder, for example to `/opt/etofc-drill`, with the live `.env`, and copy one backup file into its `backups/`.
-2. Add `COMPOSE_PROJECT_NAME=etofc-drill` to its `.env`, and check that `docker compose config | head -1` prints `name: etofc-drill` before going on.
-3. Run `docker compose up -d db backup`, then restore as in 6.5 (the backend is not running here, so skip its `stop`). Do not start the backend or the web server in this folder: with the live `.env`, its nightly jobs would mail the live installation's users.
-4. Compare the row counts with the live installation by running this in both folders:
-   ```bash
-   docker compose exec -T db psql -U eto -d etofc -c "SELECT table_name, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), false, true, '')))[1]::text::int AS rows FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY 1"
-   ```
-5. Remove the rehearsal: `docker compose down -v` in its folder, then delete the folder.
-
-## 7. Monitoring
-
-- **Uptime:** point an outside monitor (UptimeRobot or the host's own) at `https://<address>/health` and expect `{"status":"ok"}`. This shows that the backend runs. It does not test the database. A monitor that checks every 5 minutes misses short outages, such as an update's restart, and its alert can come up to 5 minutes late.
-- **Mail account:** some mail services disable SMTP credentials that go unused for a while, without notice. The maintainer's error mails go through the same account, so nothing reports it. After a long quiet period, such as the summer break, send a test invitation.
-- **Backups:** the newest file in `backups/` should be less than 26 hours old:
-  ```bash
-  find backups -name 'etofc-*.dump.age' -mmin -1560 | grep -q . || echo "no recent backup"
-  ```
-- **Background jobs:** a failed nightly job e-mails the maintainer address.
-- **Logs:** `docker compose logs --tail 200 backend`. Each service keeps three 10 MB log files.
-
-## 8. Maintenance tasks
-
-**Changing the public address**
-1. Set the new `FRONTEND_URL` and `OUTLOOK_REDIRECT_URI` in `.env`.
-2. Change the redirect URI in the Azure app registration.
-3. Update the proxy.
-4. Run `docker compose up -d`.
-
-**Running a background job by hand.** The jobs are `outlook-token-health`, `outlook-repair`, `outlook-prune`, `mlsz-refresh` and `dorm-digest`:
-```bash
-docker compose exec backend node dist/src/jobs/cli.js mlsz-refresh
-```
-
-**PostgreSQL 16 is supported until November 2028.** The move to a newer major version ships as an app release with a matching backup image. The procedure:
-1. Take a backup and check it (section 6.4).
-2. Run `docker compose down`.
-3. Run `docker volume rm etofc_pg_data`.
-4. Install the release.
-5. Run `docker compose up -d db backup`.
-6. Restore (section 6.5).
-7. Run `docker compose up -d`.
-
-## 9. Troubleshooting
-
-| Symptom | Cause |
-| --- | --- |
-| `docker compose` stops with "... nincs megadva a .env fájlban" | That line of `.env` is missing or empty |
-| The backend restarts over and over, the log says "Hibás éles konfiguráció" | The log line names the `.env` value that is wrong |
-| Every login or save fails with 403 | `FRONTEND_URL` is not exactly the address in the browser (scheme, host and port, no trailing slash) |
-| Login does not stick over plain HTTP | Session cookies are HTTPS-only. Use the proxy's HTTPS address |
-| Everyone gets "Túl sok kérés" at once, even with few users | `TRUST_PROXY_HOPS` is lower than the number of proxies plus one, so all users share one limit |
-| Users behind one shared address (the club's Wi-Fi) get "Túl sok kérés" at busy times | The limit is per address: 5000 requests per 15 minutes. Raise it with `RATE_LIMIT_GLOBAL_MAX=<n>` in `.env`, then `docker compose up -d` |
-| Floor plan or PDF uploads fail | The proxy's request body limit is under 10 MB |
-| The finalization progress freezes, then jumps | The proxy buffers `text/event-stream` |
-| No e-mails arrive | `docker compose logs backend`. Also check the sender domain's SPF and DKIM records for the SMTP service |
-| Sending an invitation takes about half a minute, then fails | The host blocks the SMTP port. Test it as in section 1 and use another port of the mail service |
-| E-mails land in Junk | See the mail service requirements in section 1 |
-| `docker run` in section 6.4 fails with "unauthorized" | That machine is not logged in to `ghcr.io` (section 2, step 1) |
-| `docker volume ls` shows an unnamed volume beside `etofc_pg_data` | The backup service's own empty volume. Harmless. After `docker compose down -v`, `docker volume prune` removes leftover unnamed volumes and never touches named ones |
-| API calls fail with 502 for a few seconds after `up -d` | The backend is still starting. It answers once `docker compose ps` shows it `healthy` |
-| `[pdf]` lines about the Chromium sandbox in the log | Expected in a container. PDFs still render |
-
-## 10. Secrets
-
-All secrets are in `.env`, which only its owner can read. Do not change a value unless this table says it is safe.
-
-| Value | What changing it does |
-| --- | --- |
-| `JWT_SECRET` | Safe at any time. Everyone is logged out |
-| `OUTLOOK_STATE_SECRET` | Safe at any time. An Outlook connection started in the last 10 minutes fails and can be retried |
-| `TWO_FACTOR_ENCRYPTION_KEY` | **Never change or lose it.** Everyone with two-step login is locked out |
-| `OUTLOOK_TOKEN_ENCRYPTION_KEY` | Every connected user has to reconnect Outlook |
-| `BACKUP_ENCRYPTION_KEY` | New backups use the new key. Keep the old key as long as backups made with it exist |
-| `POSTGRES_PASSWORD` | Run `docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD '<new>'"`, then put the same value in `.env` and run `docker compose up -d` |
-| `SMTP_PASS` | Set by the mail provider. Change it there first, then in `.env` |
-| `OUTLOOK_CLIENT_SECRET` | See section 4.2 |

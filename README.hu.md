@@ -1,329 +1,248 @@
-# ETO FC Heti Program: üzemeltetési kézikönyv
+# Az ETO FC Heti Program üzemeltetési útmutatója
 
-In English: [README.md](README.md).
+[English version](README.md)
 
-Az ETO FC Heti Program az ETO FC labdarúgóklub heti beosztás- és erőforrás-kezelő webalkalmazása: edzések, mérkőzések, pályák, helyiségek, a kollégium és a heti program. Ez a telepítőcsomagja, minden, ami a futtatásához egy szerveren kell. Forráskódot nem tartalmaz: az alkalmazás konténerképként érkezik a GitHub Container Registryből (`ghcr.io/delilaszlo/eto-backend`, `eto-frontend` és `eto-backup`).
-
-Az [eto-resource-scheduler](https://github.com/delilaszlo/eto-resource-scheduler) nyilvános tárolót a privát forráskód-tárolóból automatikusan frissítjük, ezért az ott közvetlenül végzett módosítások felülíródnak. Minden verziócímke (`v1.0.0`) az azonos számú képfájl-verzióhoz tartozik. Licenc: MIT, lásd [LICENSE](LICENSE).
-
-| Fájl | Szerepe |
-| --- | --- |
-| `docker-compose.yaml` | A négy szolgáltatás: adatbázis, backend, éjszakai mentés, webszerver |
-| `setup.sh` | Egyszer megírja a `.env` fájlt: bekéri a külső adatokat, és minden titkot legenerál |
-| `update.sh` | Új verzióra vált: mentés, újraindítás, állapotellenőrzés |
-| `proxy/` | HTTPS proxy példák Caddyhez és nginxhez |
+Az ETO FC Heti Program az ETO FC labdarúgóklub heti programtervező webalkalmazása. Ez a csomag Dockerrel telepíti egy szerverre. A lépések egy frissen telepített, üres szerverből indulnak ki. A telepítés után az üzemeltetés nagy része az üzemeltetői konzolon történik, a `https://<cím>/console` címen. A licenc MIT, lásd [LICENSE](LICENSE).
 
 ## 1. Követelmények
 
-**Szerver**
-- Linux x86-64 processzoron, 2 vCPU, 4 GB RAM, 20 GB szabad lemezterület.
-- Docker Engine Compose v2-vel (a `docker compose version` működik). A Compose 2.33 és 5.6 kipróbált.
-- Az órának szinkronban kell lennie, mert a kétlépcsős azonosítás kódjai időalapúak. A `timedatectl` kimenetében `System clock synchronized: yes` szerepeljen.
-
-Mérések egy 2 vCPU-s, 4 GB-os szerveren: 40 egyidejű felhasználónál a terhelési átlag 1 alatt, a teljes szerver memóriahasználata 800 MB alatt maradt, és a kérések 95%-ára 120 ms-on belül jött válasz. Az első PDF elindít egy Chromiumot, amely a memóriában marad, ettől kezdve a backend körülbelül 0,5 GB-ot használ, renderelés közben legfeljebb 0,6 GB-ot. A lemezt főleg a képfájlok (image-ek) foglalják: körülbelül 5 GB, amíg két verzió van a szerveren (5. fejezet).
-
-**Hálózat**
-- A Docker a belső hálózatait a `172.17.0.0/16`–`172.31.0.0/16` és a `192.168.0.0/16` tartományban hozza létre. Ha a helyi hálózat ezek közül bármelyiket használja, az első indítás előtt állítsd be a `default-address-pools` értéket a `/etc/docker/daemon.json` fájlban, különben a szerver elvesztheti a kapcsolatot a hálózat azon részével.
-- Közvetlen kimenő hozzáférés (az alkalmazás nem támogat kimenő HTTP proxyt):
-  - az SMTP szerver a portjával;
-  - `ghcr.io` és `registry-1.docker.io` (képfájlok);
-  - `adatbank.mlsz.hu` (mérkőzések);
-  - `login.microsoftonline.com` és `graph.microsoft.com` (csak Outlookkal).
-- Sok tárhelyszolgáltató tiltja a kimenő 587-es és 465-ös portot. Az SMTP port kiválasztása előtt próbáld ki:
-  ```bash
-  nc -vz -w 5 <smtp-szerver> 587
-  ```
-  Ha időtúllépéssel leáll, a port tiltva van. A legtöbb levelezőszolgáltatás más portot is elfogad, például a 2525-öt.
-
-**Levelezőszolgáltatás**
-- A feladó címének domainje DNS-ben engedélyezze a szolgáltatást (SPF, DKIM és DMARC), különben a heti program a levélszemétbe kerül.
-- A szolgáltatás ne írja át a hivatkozásokat (kattintáskövetés), ne tegyen a levélbe követőképet, és ne adjon hozzá leiratkozási fejlécet. Az átírt hivatkozás a levélszemétszűrőknek adathalászatnak látszik. Ha egy munkatárs leiratkozási hivatkozásra kattint, a szolgáltatás szó nélkül letiltja, és többé nem kapja meg a heti programot.
-- Élesítés előtt küldj próbalevelet egy Gmail és egy Outlook.com címre. Egy új feladói domain levele a Microsoftnál gyakran a Levélszemét mappába kerül akkor is, ha minden ellenőrzésen átmegy.
-
-**HTTPS proxy előtte**
-
-Az alkalmazás sima HTTP-t szolgál ki a szerver egy portján. Elé HTTPS proxy kell, és az alkalmazásnak saját hosztnév kell (`eto.example.hu`, nem `example.hu/eto/`). A proxy:
-- csak HTTPS-t szolgáljon ki, a HTTP-t irányítsa át HTTPS-re;
-- a teljes hosztnevet továbbítsa az alkalmazás portjára;
-- engedjen legalább 10 MB-os kéréstörzset;
-- ne pufferelje a `text/event-stream` válaszokat (a heti véglegesítés folyamatjelzője);
-- engedjen legalább 60 másodperces olvasási időkorlátot;
-- állítsa be az `X-Forwarded-For` fejlécet.
-
-Működő példák: `proxy/Caddyfile.example` és `proxy/nginx.conf.example`. A `Strict-Transport-Security` fejléc ajánlott, mindkettőben benne van.
-
-**Tűzfal.** A Docker által közzétett port megkerüli az `ufw`-t. Ha a proxy ugyanazon a gépen fut, a `setup.sh` az alkalmazást a `127.0.0.1` címhez köti, így más nem éri el. Ha a proxy másik gépen fut, az alkalmazás a hálózaton figyel, ezért a portját korlátozd a proxy címére a felhő vagy a hálózat tűzfalában, vagy a `DOCKER-USER` iptables láncban.
+- Egy x86-64 szerver Ubuntu 22.04, 24.04 vagy Debian 12, 13 rendszerrel.
+- Legalább 2 processzormag, 4 GB RAM és 20 GB szabad tárhely.
+- Egy domainnév, például `eto.example.hu`. A DNS-rekordjának már a telepítés előtt a szerverre kell mutatnia.
+- Egy SMTP-levelezőfiók.
+- Ajánlott a telepítés előtt beállítani az SSH-t, kulcsos belépéssel és kikapcsolt jelszavas belépéssel.
+- Opcionális. Egy Microsoft Entra alkalmazásregisztráció az Outlook-szinkronhoz, és egy S3-kompatibilis tárhely a felhős mentésekhez.
 
 ## 2. Telepítés
 
-Másold ezt a mappát a szerverre, például a `/opt/etofc` helyre, és abban dolgozz. Arról a gépről, ahol a mappa van (Linux, macOS vagy Windows PowerShell):
 ```bash
-scp -r deploy <felhasználó>@<szerver>:~/etofc
-ssh <felhasználó>@<szerver> "sudo mv ~/etofc /opt/etofc"
-```
-Vagy klónozd a nyilvános tárolót a szerveren, és válts a telepítendő verzióra:
-```bash
+sudo apt update && sudo apt install -y git
 sudo git clone https://github.com/delilaszlo/eto-resource-scheduler.git /opt/etofc
-sudo chown -R $USER: /opt/etofc
-cd /opt/etofc && git checkout v1.0.0
-```
-Az alábbi parancsok feltételezik, hogy a felhasználó a `docker` csoport tagja. Ha nem, minden `docker` és `sh` parancs elé írj `sudo`-t.
-
-1. Ha a képfájlok privátak, egyszer jelentkezz be egy csak `read:packages` jogosultságú GitHub tokennel:
-   ```bash
-   docker login ghcr.io -u <github-felhasználó>
-   ```
-2. Írd meg a beállításokat. A paraméter a telepítendő verzió:
-   ```bash
-   sh setup.sh 1.0.0
-   ```
-   Bekéri:
-   - a nyilvános címet;
-   - hány HTTPS proxy áll előtte, és a legközelebbi ezen a gépen fut-e;
-   - az SMTP szervert, portot, felhasználót és jelszót, valamint a feladó címét;
-   - az üzemeltető e-mail címét;
-   - az Outlook adatait (nem kötelező, lásd a 4. fejezetet);
-   - az alkalmazás nevét.
-
-   Minden titkot legenerál, és a `.env` fájlt csak a tulajdonosa számára olvashatóan írja meg. **A végén kiír két kulcsot. Ezeket most tárold el a szerveren kívül, két helyen** (jelszókezelő, lezárt boríték). A `BACKUP_ENCRYPTION_KEY` nélkül egyetlen mentés sem állítható vissza. A `TWO_FACTOR_ENCRYPTION_KEY` nélkül a kétlépcsős azonosítást használók nem tudnak belépni. Még jobb, ha a teljes `.env` fájlról van másolat.
-
-   A `setup.sh` nem fut le, ha már van `.env`, mert az új kulcsok használhatatlanná tennék a meglévő mentéseket és a kétlépcsős azonosítást.
-3. Indítás:
-   ```bash
-   docker compose pull
-   docker compose up -d
-   docker compose ps
-   ```
-   A backend az első indításkor létrehozza az adatbázis tábláit. Körülbelül egy perc múlva mind a négy szolgáltatás fut, a `db` és a `backend` állapota `healthy`.
-4. Ellenőrzés magáról a szerverről (a `setup.sh`-nak megadott porttal):
-   ```bash
-   curl http://127.0.0.1:3000/health
-   ```
-   A válasz `{"status":"ok"}`.
-5. Állítsd be a HTTPS proxyt, majd nyisd meg a nyilvános címet böngészőben. Megjelenik a bejelentkezési oldal. Belépni még senki sem tud.
-
-Összeomlás vagy újraindítás után minden szolgáltatás magától elindul.
-
-## 3. Kezdő adatok és élesítés
-
-A telepítés nem küld e-mailt. Az alábbi lépések csak az ellenőrzést végző személynek küldenek levelet.
-
-**3.1 Kezdő adatok, egyszer.** A klub kezdő adatai (adminisztrátor, munkatársak, csapatok, helyiségek) a `seed-data.json` fájlban érkeznek. Neveket, e-mail címeket és az adminisztrátor egyszer használatos jelszavát tartalmazza, ezért csak SSH-n (`scp`) utazik, soha nem e-mailben vagy csevegőben.
-
-Ha nulláról kell megírni, indulj ki a képfájlban lévő példából, és cserélj le benne minden értéket, mindenekelőtt az adminisztrátor címét és jelszavát:
-```bash
-docker compose run --rm -T --no-deps --entrypoint cat backend prisma/seed-data.example.json > seed-data.json
+cd /opt/etofc
+sudo sh setup.sh
 ```
 
-```bash
-chmod 644 seed-data.json
-docker compose run --rm -v "$PWD/seed-data.json:/app/backend/prisma/seed-data.json:ro" backend npm run db:seed
-rm seed-data.json
-```
+A szkript a legújabb verziót telepíti. Egy adott verzió a számával telepíthető, például `sudo sh setup.sh 1.0.0`.
 
-A `$PWD` pontosan így szerepeljen. A Compose régebbi verziói az itt megadott relatív útvonalból üres kötetet csinálnak. A fájl nélkül a parancs leáll, és kiírja a szükséges csatolást. Az adatok innentől az adatbázisban és a mentéseiben vannak.
+A szkript az alábbi kérdéseket teszi fel. A szögletes zárójelben lévő érték az alapérték, ezt az Enter elfogadja.
 
-Hibás fájl esetén az adatbázis kiüríthető és újra feltölthető, de csak amíg semmi valódi adat nem került bele:
-```bash
-docker compose down
-docker volume rm etofc_pg_data
-docker compose up -d
-```
+| Kérdés | Példa válasz | Megjegyzés |
+| --- | --- | --- |
+| „A Docker nincs telepítve. Telepítsem a Docker hivatalos csomagtárából” | `i` | Csak ha nincs Docker |
+| „A curl nincs telepítve. Telepítsem” | `i` | Csak ha nincs curl |
+| „Folytatod így is” | `n` | Csak óra- vagy hálózati figyelmeztetés után. A figyelmeztetés megmondja a javítást |
+| „Egy korábbi telepítés mentését állítod vissza (költözés új szerverre)” | `n` | `i` csak költözéskor, lásd az 5. részt |
+| „Az alkalmazás nyilvános címe, például https://eto.example.hu” | `https://eto.example.hu` | |
+| „A HTTPS-t ez a szerver szolgálja ki a beépített Caddyvel (nem, ha már van saját HTTPS proxy)” | `i` | `n` esetén a következő táblázat kérdései jönnek |
+| „Hány CDN áll a szerver előtt (például 1 Cloudflare-rel, 0 ha nincs)” | `0` | |
+| „Az alkalmazás neve” | Enter | Alapérték `ETO FC Heti Program`. Az e-mailek tárgyában jelenik meg |
+| „Az üzemeltető e-mail címe (a konzol belépése és az értesítések)” | `uzemelteto@example.hu` | |
+| „Az üzemeltető jelszava (legalább 12 karakter)”, majd „Jelszó újra” | | Gépelés közben nem látszik |
+| „A(z) admin felhasználó sudo nélkül is kezelje a konténereket (docker csoport)” | `i` | Csak sudóval futtatva. A felhasználó következő belépésétől érvényes |
+| „Az ufw tűzfal nincs telepítve. Telepítsem és állítsam be” | `i` | Csak ha nincs ufw |
+| „Az SSH port(ok), szóközzel elválasztva” | Enter | Az alapérték az SSH-szerver portja |
+| „Bekapcsoljam a tűzfalat úgy, hogy csak ezek a portok legyenek nyitva (22 80 443)” | `i` | |
 
-**3.2 Ellenőrzések.** Ezek senkinek sem küldenek levelet a munkatársak közül. Ne véglegesíts hetet, és ne hívj meg munkatársakat.
-- A `https://<cím>/health` válasza `{"status":"ok"}`, és a `http://<cím>` HTTPS-re irányít át.
-- Az adminisztrátor belép az egyszer használatos jelszóval, megváltoztatja, és beállítja a kétlépcsős azonosítást.
-- E-mail: az adminisztrátor a Felhasználók oldalon meghívja az ellenőrző saját címét. A levél megérkezik, és a hivatkozása a nyilvános címet nyitja meg. Utána az adminisztrátor felhasználatlanul törli a meghívót.
-- PDF: a Tervező nyomtatási előnézete megjelenik.
-- Kimenő hozzáférés a backend konténerből:
-  ```bash
-  docker compose exec backend node -e "fetch('https://adatbank.mlsz.hu').then(r => console.log(r.status))"
-  ```
-- Mentések: másnap reggel új fájl van a `backups/` mappában, és megnyílik a kulcs szerveren kívüli másolatával (6.4).
+Ha saját HTTPS proxy áll az alkalmazás előtt, a CDN-es kérdés helyett ezek jönnek.
 
-**3.3 Élesítés (a klub adminisztrátora).** Töltsd fel a kollégium alaprajzát, állítsd be a tervezők jogosultságait, majd a Felhasználók oldalon hívd meg azokat a munkatársakat, akik használni fogják az alkalmazást. Akiknek csak a heti PDF kell, azokat nem kell meghívni: így is megkapják. A fel nem használt meghívó 7 nap után lejár, és újraküldhető. Az első valódi véglegesítés mindenkinek elküldi a heti PDF-et.
+| Kérdés | Példa válasz | Megjegyzés |
+| --- | --- | --- |
+| „Hány proxy áll az alkalmazás előtt a saját HTTPS proxyval együtt (például 1, vagy 2 Cloudflare-rel)” | `1` | |
+| „Melyik porton figyeljen az alkalmazás a saját proxy felé” | `3000` | |
+| „A saját HTTPS proxy ezen a gépen fut” | `i` | |
+| „Melyik címen érje el a proxy ezt a gépet (0.0.0.0 = minden címen)” | `10.0.0.5` | Csak ha az előző válasz `n` volt |
 
-## 4. Outlook
+A végén a szkript kiírja a `BACKUP_ENCRYPTION_KEY` és a `TWO_FACTOR_ENCRYPTION_KEY` értékét. Ezek a `.env` fájlban is megvannak. Ha a szerver vagy a `.env` elvész, egy mentés csak ezzel a két kulccsal állítható vissza, ezért a szerveren kívül is tárolni kell őket, például egy jelszókezelőben.
 
-Az Outlook naptárszinkron ki van kapcsolva, amíg az Outlook értékek üresek a `.env` fájlban. Az alkalmazás többi része normálisan működik, az adminisztrátorok a profiljukon látják, hogy az integráció nincs beállítva.
+Ha a szkript félúton leáll, a hiba javítása után újra futtatható. Ott folytatja, ahol abbahagyta, és megtartja a kulcsokat.
 
-**4.1 Bekapcsolás**
-1. A Microsoft Entra felügyeleti központban regisztrálj egy alkalmazást (vagy használj egy meglévőt):
-   - fióktípus: csak ez a szervezet;
-   - átirányítási URI, Web platform: `https://<cím>/api/integrations/outlook/callback`;
-   - delegált Microsoft Graph jogosultságok: `offline_access`, `User.Read`, `Calendars.ReadWrite`.
+## 3. Első lépések a konzolon
 
-   Hozz létre egy ügyfélkulcsot (client secret), és **jegyezd fel a lejárati napját**.
-2. Töltsd ki ezeket a sorokat a `.env` fájlban (egy minimális szerveren lehet, hogy nincs szerkesztő: `sudo apt install -y nano`, majd `nano .env`):
-   ```
-   OUTLOOK_CLIENT_ID=<alkalmazás (ügyfél) azonosító>
-   OUTLOOK_CLIENT_SECRET='<az ügyfélkulcs értéke>'
-   OUTLOOK_CLIENT_SECRET_EXPIRES=2028-10-15
-   OUTLOOK_TENANT_ID=<címtár (bérlő) azonosító>
-   ```
-   Az `OUTLOOK_REDIRECT_URI` sort a `setup.sh` már megírta. A backend nem indul el, ha az azonosító és a kulcs meg van adva érvényes lejárati nap nélkül.
-3. Érvényesítés:
-   ```bash
-   docker compose up -d
-   ```
-   Csak a backend jön létre újra, az alkalmazás 10–20 másodpercig nem érhető el. A felhasználók bejelentkezve maradnak. Ne a `docker compose restart` parancsot használd: az nem olvassa újra a `.env` fájlt. Ez minden `.env` módosításra igaz.
+A konzol a `https://<cím>/console` címen érhető el, az üzemeltető e-mail-címével és jelszavával. Az első belépés beállítja a kétlépcsős azonosítást egy hitelesítő alkalmazással. Ezután az Áttekintés oldal sorolja fel a hiányzó beállításokat. A mentések felhőmásolatát a 4. rész írja le.
 
-A kikapcsolás fordítva megy: ürítsd ki az azonosítót és a kulcsot, majd `docker compose up -d`. A meglévő kapcsolatok megmaradnak, és visszakapcsolás után újra működnek.
+### Levelezés
 
-**4.2 Az ügyfélkulcs lejár.** A portál legfeljebb 24 hónapot enged. Az üzemeltető címére 30, 7 és 1 nappal az `OUTLOOK_CLIENT_SECRET_EXPIRES` előtt levél érkezik. Csere:
-1. Hozz létre új ügyfélkulcsot ugyanabban az alkalmazásregisztrációban, és jegyezd fel a lejárati napját.
-2. Az új értéket írd az `OUTLOOK_CLIENT_SECRET`, az új napot az `OUTLOOK_CLIENT_SECRET_EXPIRES` sorba.
-3. Futtasd: `docker compose up -d`.
-4. Töröld a régi kulcsot a portálon.
+A levelezés beállításai a Beállítások, Levelezés alatt vannak. Amíg nincsenek beállítva, az alkalmazás nem küld e-mailt. Mentés előtt próbalevél megy az üzemeltető címére.
 
-Ha a kulcs mégis lejár, a szinkron leáll, és az éjszakai ellenőrzés levelet küld az üzemeltetőnek. A kulcs cseréje elég: a felhasználóknak nem kell újra csatlakozniuk.
+| Mező | Példa | Megjegyzés |
+| --- | --- | --- |
+| SMTP szerver | `smtp.example.hu` | A levelezési szolgáltató adja meg |
+| Port | `587` | A levelezési szolgáltató adja meg |
+| Felhasználónév | `heti@example.hu` | Üres, ha a szerver nem kér belépést |
+| Jelszó | | A levelezőfiók jelszava |
+| Feladó címe | `heti@example.hu` | A levelezési szolgáltatónak engedélyeznie kell a küldést erről a címről |
+| Feladó neve | `ETO FC Heti Program` | |
 
-## 5. Frissítés
+### Kezdő adatok
+
+Az Áttekintés oldal kártyáján letölthető egy példafájl. A kitöltött fájl ugyanott tölthető fel, egyszer, amíg a klubnak nincs felhasználója. Mentés előtt egy előnézet jelzi a hibákat.
+
+A `seededUsers` felhasználói a fájlban megadott jelszóval lépnek be. Az `invitedUsers` felhasználóit a klub adminjai hívják meg. A jelszavak kiküldése után a fájlt törölni kell.
+
+### Outlook
+
+Az Outlook beállításai a Beállítások, Outlook alatt vannak. Az Outlook-szinkronhoz egy alkalmazásregisztráció kell. A regisztráció a Microsoft Entra felügyeleti központban (`entra.microsoft.com`) készül, a következő lépésekkel.
+
+1. App registrations, New registration.
+2. Név `ETO FC Heti Program`. Supported account types „Accounts in any organizational directory and personal Microsoft accounts”, ha bármilyen Microsoft-fiók csatlakozhat. „Accounts in this organizational directory only”, ha csak egy szervezet fiókjai.
+3. Redirect URI Web platformmal. Az értéke a konzol Átirányítási cím mezője, például `https://eto.example.hu/api/integrations/outlook/callback`.
+4. API permissions, Add a permission, Microsoft Graph, Delegated permissions. Az `offline_access`, a `User.Read` és a `Calendars.ReadWrite` jogosultságot kell hozzáadni.
+5. Certificates & secrets, New client secret. A lejárat legfeljebb 24 hónap. A titok értékét (Value) csak egyszer mutatja meg.
+
+| Mező | Példa | Megjegyzés |
+| --- | --- | --- |
+| Alkalmazásazonosító | `0f3c9a2e-5b1d-4c7e-9a8f-2d6b4e1c7a90` | Application (client) ID az alkalmazás Overview oldalán |
+| Bérlőazonosító | `common` | `common`, ha bármilyen Microsoft-fiók csatlakozhat. Ha csak egy szervezet fiókjai, a Directory (tenant) ID az alkalmazás Overview oldaláról |
+| Alkalmazás titka | | Az új titok Value értéke, nem a Secret ID |
+| A titok lejárata | `2028-11-01` | A titok lejárati dátuma |
+
+Mentés előtt a konzol az Azure-nál ellenőrzi az azonosítót és a titkot. A titok lejárata előtt a konzol e-mailt küld. Az új titok az 5. lépéssel készül, és ugyanebbe a két mezőbe kerül.
+
+## 4. Mentések
+
+Az adatbázisról minden éjjel 02:00-kor, nyári időszámítás idején 03:00-kor mentés készül. A mentéseket a `BACKUP_ENCRYPTION_KEY` titkosítja. A szerver 14 napig őrzi meg őket, egyszerre legfeljebb 21-et. A konzol Mentések oldalán igény szerint is készíthető mentés, és ott minden mentés letölthető.
+
+### Felhőmásolat
+
+A szerveren lévő mentés a szerverrel együtt elvész. Ezért a konzol minden éjjel 03:40-kor feltölti az új mentéseket egy S3-kompatibilis tárhelyre, hetente legfeljebb 14-et. A beállítások a Beállítások, Felhőmásolat alatt vannak. A példa a Backblaze B2, mert az első 10 GB ingyenes, és ez elég a klub mentéseihez.
+
+A Backblaze B2 tárhely a következő lépésekkel készül.
+
+1. Regisztráció a `backblaze.com` oldalon EU Central régióval. A régió csak a regisztrációkor választható, és ezzel a klub adatai az EU-ban maradnak.
+2. Buckets, Create a Bucket. Egyedi név, például `eto-mentesek`, Files in Bucket Private, Object Lock Enable.
+3. A tároló Object Lock beállítása, 7 napos alapértelmezett megőrzéssel. Így egy hétig senki sem törölheti a mentést, ellopott kulccsal sem.
+4. A tároló Lifecycle Settings beállítása, egyéni szabállyal. Days till hide 8, days till delete 1. Így a zárolás lejárta után a régi mentések nem halmozódnak fel.
+5. Application Keys, Add a New Application Key. Hozzáférés csak ehhez a tárolóhoz, Write Only típussal. Így a szerver feltölteni tud, törölni nem. A kulcsot a Backblaze csak egyszer mutatja meg.
+
+| Mező | Példa | Megjegyzés |
+| --- | --- | --- |
+| S3 végpont | `https://s3.eu-central-003.backblazeb2.com` | A tárolók listájában látható Endpoint, `https://` előtaggal |
+| Régió | `eu-central-003` | A végpont középső része |
+| Tároló neve | `eto-mentesek` | |
+| Mappa a tárolóban | `etofc` | Opcionális. Üresen a tároló gyökerébe tölt fel |
+| Kulcsazonosító | `0031a2b3c4d5e6f0000000001` | Az új kulcs keyID értéke |
+| Titkos kulcs | | Az új kulcs applicationKey értéke |
+
+Mentés előtt a konzol egy próbafájlt tölt fel a tárolóba.
+
+### Mentés visszaállítása
+
+Egy mentés négy paranccsal állítható vissza a szerveren. A Mentések oldal minden mentésnél megmutatja őket, a fájl nevével.
 
 ```bash
-sh update.sh 1.0.1
+cd /opt/etofc
+sudo docker compose stop backend
+sudo docker compose exec -T backup sh /backup.sh restore etofc-20261107T010000Z.dump.age
+sudo docker compose up -d --wait
 ```
-Ha a mappa a nyilvános tároló klónja, előbb válts ugyanarra a verzióra, hogy a csomag fájljai egyezzenek a képfájlokkal:
+
+A visszaállítás először egy külön adatbázisba történik. Sikertelen visszaállítás esetén a jelenlegi adatok érintetlenek maradnak.
+
+## 5. Költözés új szerverre
+
+A költözéshez a legújabb mentés és a két elmentett kulcs kell. A mentés az S3-tárolóból vagy a régi konzolról tölthető le. A domain DNS-rekordjának már a telepítés előtt az új szerverre kell mutatnia.
+
+A mentést először fel kell másolni az új szerverre. Onnan a telepítés előtt a csomag `backups` mappájába kerül, egyébként a telepítés a 2. rész parancsaival történik.
+
 ```bash
-git fetch --tags && git checkout v1.0.1
+sudo apt update && sudo apt install -y git
+sudo git clone https://github.com/delilaszlo/eto-resource-scheduler.git /opt/etofc
+sudo mkdir /opt/etofc/backups
+sudo cp ~/etofc-*.dump.age /opt/etofc/backups/
+cd /opt/etofc
+sudo sh setup.sh
 ```
 
-Megerősítést kér, majd:
-1. letölti az új verzió képfájljait, ha még nincsenek a szerveren;
-2. mentést készít;
-3. az új verzióval újraindít, és megvárja, amíg minden szolgáltatás egészséges;
-4. törli az előző verziónál régebbi képfájlokat;
-5. kiírja a pontos visszaállítási parancsokat.
+A 2. részhez képest ezek a kérdések térnek el.
 
-Az adatbázis-migrációk az új backend indulásakor maguktól lefutnak. Egy frissítés körülbelül 650 MB letöltés. Az előző verzió képfájljai a visszaálláshoz a következő frissítésig a szerveren maradnak.
+| Kérdés | Példa válasz | Megjegyzés |
+| --- | --- | --- |
+| „Egy korábbi telepítés mentését állítod vissza (költözés új szerverre)” | `i` | |
+| „BACKUP_ENCRYPTION_KEY” | `AGE-SECRET-KEY-1…` | Az elmentett kulcs, gépelés közben nem látszik |
+| „TWO_FACTOR_ENCRYPTION_KEY” | 64 hexadecimális karakter | Az elmentett kulcs, gépelés közben nem látszik |
 
-**Mikor ne frissíts**
-- Amíg valaki egy hetet véglegesít: a véglegesítés a backend memóriájában fut, újraindításkor elvész.
-- 01:45 és 04:00 között magyar idő szerint: ekkor futnak az éjszakai mentés és feladatok.
+Az üzemeltető e-mail-címét és jelszavát nem kérdezi, mert az üzemeltetői fiók a mentéssel visszajön. Az indulás után a szkript visszaállítja a `backups` mappa legújabb mentését. Ezzel a konzol beállításai is visszajönnek.
 
-**Visszaállás.** A migrációk nem vonhatók vissza, ezért a visszaállás az előző verzió és a közvetlenül a frissítés előtt készült mentés. Az `update.sh` ezeket a parancsokat a verzióval és a fájlnévvel kitöltve írja ki:
+Az új `.env` új `JWT_SECRET` és új `OUTLOOK_TOKEN_ENCRYPTION_KEY` értéket kap. Ezért mindenkinek újra be kell lépnie, és az Outlookot csatlakoztató felhasználóknak újra csatlakoztatniuk kell. Ha a régi `.env` megmaradt, a `setup.sh` előtt az `/opt/etofc` mappába másolható, és ekkor erre nincs szükség. A szkript ilyenkor megkérdezi, visszaállítsa-e a legújabb mentést, erre a válasz `i`.
+
+A még futó régi szervert le kell állítani, különben mindkét szerver kiküldi az e-maileket.
+
+## 6. Frissítés
+
 ```bash
-sed -i 's/^APP_VERSION=.*/APP_VERSION=1.0.0/' .env
-docker compose stop backend
-docker compose exec -T backup sh /backup.sh restore etofc-20261015T164549Z.dump.age
-docker compose up -d
+cd /opt/etofc
+sudo sh update.sh X.Y.Z
 ```
-A frissítés után bevitt adatok elvesznek.
 
-**Biztonsági frissítések.** A képfájlok saját operációs rendszert, Node.js-t, Chromiumot, nginxet és PostgreSQL-t tartalmaznak. Minden kiadás az aktuális alapképekre épül, így egy kiadás telepítése ezeket is frissíti; ha csak egy alapképben van javítás, ugyanannak a kódnak egy új kiadása elég. A szerver saját csomagjait a disztribúció szokásos eszközeivel frissítsd.
+Az `X.Y.Z` egy kiadott verziószám, például `1.2.0`. A verziók listája a [GitHubon](https://github.com/delilaszlo/eto-resource-scheduler/tags) van. A legújabbat a konzol Állapot oldala is mutatja, és az üzemeltető minden új verzióról e-mailt kap.
 
-## 6. Mentések
+A szkript mentést készít, majd elindítja az új verziót, és megvárja, amíg elkészül. Ha az új verzió nem indul el, kiírja a régi verzióra és annak mentésére visszaálló parancsokat. Heti program véglegesítése közben, és magyar idő szerint 01:45 és 04:00 között nem szabad frissíteni, mert ekkor futnak az éjszakai feladatok.
 
-**6.1 Ütemezés.** A `backup` szolgáltatás minden éjjel 01:00-kor (UTC) menti az adatbázist a `backups/` mappába, a `BACKUP_ENCRYPTION_KEY` kulccsal titkosítva, és a 14 legújabb fájlt tartja meg. A titkosított fájlok bárhová másolhatók. A fájlok a `root` tulajdonában vannak: bárki olvashatja és másolhatja őket, de kézi törlésükhöz `sudo` kell.
+## 7. Hibaelhárítás
 
-**6.2 A szerveren kívül.** Az ugyanazon a lemezen lévő mentés nem éli túl a szerver elvesztését. Másold a `backups/` mappát naponta máshová, például egy másik gépről:
+### Telepítés közben
+
+| Probléma | Ok | Megoldás |
+| --- | --- | --- |
+| A cím még nem válaszol | A DNS-rekord nem a szerverre mutat, vagy a tárhelyszolgáltató tiltja a 80-as és 443-as portot | A DNS-rekord vagy a portok javítása után a `setup.sh` újra futtatható. A részleteket a proxy naplója mutatja |
+| Nem indultak el a szolgáltatások | Többnyire egy hibás `.env` érték | A backend naplója megnevezi a hibát |
+| Nem sikerült a letöltés | A szerver nem éri el a `ghcr.io` vagy a `download.docker.com` címet | A kimenő HTTPS-forgalmat engedélyezni kell |
+
+A naplókat ezek a parancsok mutatják.
+
 ```bash
-rsync -a etofc-server:/opt/etofc/backups/ /srv/etofc-backups/
+cd /opt/etofc
+sudo docker compose logs proxy
+sudo docker compose logs backend
 ```
 
-**6.3 Kézi mentés**
+### Működés közben
+
+A futó alkalmazás hibái a konzol Rendszernapló oldalán jelennek meg.
+
+| Probléma | Ok | Megoldás |
+| --- | --- | --- |
+| Nem érkeznek e-mailek | Hibás levelezési beállítás, vagy a tárhelyszolgáltató tiltja az 587-es portot | Az Állapot oldal mutatja az utolsó levelezési hibát. A levelezési szolgáltató másik portja, például a 2525 segíthet |
+| Az e-mailek a levélszemétbe kerülnek | A feladó domainjén nincs SPF-, DKIM- vagy DMARC-rekord | A levelezési szolgáltató rekordjait fel kell venni a domainre |
+| Minden belépés 403-as hibát ad | A `.env` `FRONTEND_URL` értéke eltér a böngészőben lévő címtől | A `FRONTEND_URL` javítása |
+| Mindenki „Túl sok kérés” hibát kap | A klub hálózata egy közös címet használ | A korlát emelése a Beállítások, Kéréskorlát alatt |
+| Leállt az Outlook-szinkron | Lejárt az Azure titok | Új titok készítése az Entra felügyeleti központban és megadása a konzolon, lásd a 3. részt |
+| Egy klubadmin elvesztette a telefonját vagy a jelszavát | | Klub adminok, Helyreállítás. Az admin jelszó-visszaállító linket kap |
+| Az üzemeltető elvesztette a telefonját | | A belépési oldal „Nem tudsz bejelentkezni?” linkje e-mailt küld, amely kikapcsolja a kétlépcsős azonosítást |
+| Az üzemeltető a jelszavát és a telefonját is elvesztette | | Az alábbi parancs |
+
+Ez a parancs új üzemeltetői jelszót állít be, és kikapcsolja a kétlépcsős azonosítást. Az új jelszót kétszer kéri.
+
 ```bash
-docker compose exec -T backup sh /backup.sh dump
+cd /opt/etofc
+sudo docker compose exec backend node dist/src/cli/operator.js reset
 ```
 
-**6.4 Mentés ellenőrzése visszaállítás nélkül.** Ott futtasd, ahol a lemásolt mentések vannak, például a szerveren kívüli másolatot tároló gépen. A mentési képfájl kell hozzá, ezért ha a képfájlok privátak, előbb ott is jelentkezz be a `ghcr.io`-ba. Tedd a kulcs szerveren kívüli másolatát (csak az `AGE-SECRET-KEY-...` szöveget) egy fájlba, majd:
+## 8. A .env fájl
+
+A `setup.sh` a szerver beállításait és titkait a `/opt/etofc/.env` fájlba írja. Csak a tulajdonosa olvashatja. Módosítás után a `sudo docker compose up -d` indítja újra az alkalmazást az új értékekkel.
+
+| Érték | Szerepe | Példa | Módosítása |
+| --- | --- | --- | --- |
+| `APP_VERSION` | A futó verzió | `1.2.0` | Csak az `update.sh`-val |
+| `APP_NAME` | Az alkalmazás neve az e-mailekben | `'ETO FC Heti Program'` | Bármikor |
+| `FRONTEND_URL` | A nyilvános cím | `https://eto.example.hu` | A DNS-rekordot és az Azure átirányítási címét is módosítani kell |
+| `TRUST_PROXY_HOPS` | Hány proxyn halad át egy kérés a backendig. Ebből állapítja meg a backend a látogató címét a kéréskorláthoz | `2` Caddyvel, `3` Caddyvel és Cloudflare-rel, `2` egy saját proxyval | Egy CDN bekapcsolása eggyel növeli, kikapcsolása eggyel csökkenti |
+| `HTTP_BIND`, `HTTP_PORT` | A cím és a port, amelyen az alkalmazás a saját proxy felé figyel | `127.0.0.1`, `3000` | A saját proxyban is át kell írni a továbbítási címet |
+| `COMPOSE_PROFILES` | `https` esetén a beépített Caddy fut, üresen saját proxy kell | `https` | Váltáskor a `TRUST_PROXY_HOPS` is változik |
+| `CADDY_TRUSTED_PROXIES` | Honnan fogadja el a Caddy a látogató címét | `'127.0.0.1/32'` CDN nélkül, `'0.0.0.0/0 ::/0'` CDN-nel | CDN be- vagy kikapcsolásakor a `TRUST_PROXY_HOPS` értékkel együtt változik |
+| `JWT_SECRET` | A belépések aláírása | 96 hexadecimális karakter | Lehetséges, de mindenki kijelentkezik, az üzemeltető is |
+| `OUTLOOK_STATE_SECRET` | Egy folyamatban lévő Outlook-csatlakozás aláírása, 10 percig érvényes | 96 hexadecimális karakter | Lehetséges. Csak az utolsó 10 percben indított csatlakozás hiúsul meg |
+| `OUTLOOK_TOKEN_ENCRYPTION_KEY` | Az Outlook-kapcsolatok titkosítása | 64 hexadecimális karakter | Lehetséges, de minden felhasználónak újra kell csatlakoztatnia az Outlookot |
+| `TWO_FACTOR_ENCRYPTION_KEY` | A kétlépcsős azonosítás és a konzol beállításainak titkosítása | 64 hexadecimális karakter | **Soha.** A kétlépcsős azonosítás és a konzol beállításai elvesznek |
+| `BACKUP_ENCRYPTION_KEY` | A mentések titkosítása | `AGE-SECRET-KEY-1…` | Lehetséges. A régi mentésekhez továbbra is a régi kulcs kell |
+| `POSTGRES_USER`, `POSTGRES_DB` | Az adatbázis felhasználója és neve | `eto`, `etofc` | Soha |
+| `POSTGRES_PASSWORD` | Az adatbázis jelszava | 48 hexadecimális karakter | Előbb az adatbázisban, lásd alább |
+
+Az adatbázis jelszava három lépésben módosul. Az első parancs az adatbázisban állítja be. Ezután ugyanez a jelszó kerül a `.env` `POSTGRES_PASSWORD` sorába. A második parancs újraindítja az alkalmazást.
+
 ```bash
-docker run --rm -i -v "$PWD/backups:/backups:ro" --entrypoint sh ghcr.io/delilaszlo/eto-backup:<verzió> \
-  -c 'cat > /tmp/key && age -d -i /tmp/key /backups/<fájl> | pg_restore --list > /dev/null && echo OK' < key.txt
-rm key.txt
+cd /opt/etofc
+sudo docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD 'UJ_JELSZO'"
+sudo docker compose up -d
 ```
-`OK` jelenik meg. Rossz kulccsal „no identity matched" hibával leáll. Windows PowerShellben, ahol nincs `<`, másold a kulcsot a vágólapra, és csővezetékkel add át:
-```powershell
-Get-Clipboard | docker run --rm -i -v "${PWD}/backups:/backups:ro" --entrypoint sh ghcr.io/delilaszlo/eto-backup:<verzió> -c 'cat > /tmp/key && age -d -i /tmp/key /backups/<fájl> | pg_restore --list > /dev/null && echo OK'
-```
-
-**6.5 Visszaállítás**
-```bash
-docker compose stop backend
-docker compose exec -T backup sh /backup.sh restore <fájl>
-docker compose up -d
-```
-A `restore` nem fut, amíg a backend fut. Külön adatbázisba állít vissza, és csak siker esetén cseréli le az élőt, így egy sikertelen visszaállítás a jelenlegi adatokat érintetlenül hagyja.
-
-**6.6 Új szerveren.** Másold át a régi `.env` fájlt, ne futtasd a `setup.sh`-t: ugyanazok a kulcsok kellenek a mentésekhez, a kétlépcsős azonosításhoz és az Outlook kapcsolatokhoz. Utána:
-1. Másold a mentésfájlt a `backups/` mappába.
-2. Futtasd: `docker compose up -d`.
-3. Állítsd vissza a 6.5 szerint.
-
-**6.7 Visszaállítás gyakorlása ugyanazon a szerveren.** A mappa második példánya ugyanaz a telepítés, amíg nincs saját projektneve, és az `up` az élő adatbázishoz csatlakozna. Ezért:
-1. Másold a mappát, például a `/opt/etofc-drill` helyre, az élő `.env` fájllal együtt, és tegyél egy mentésfájlt a `backups/` mappájába.
-2. Írd a `.env` fájljába: `COMPOSE_PROJECT_NAME=etofc-drill`, és mielőtt továbbmész, ellenőrizd, hogy a `docker compose config | head -1` kimenete `name: etofc-drill`.
-3. Futtasd: `docker compose up -d db backup`, majd állíts vissza a 6.5 szerint (itt a backend nem fut, a `stop` kimarad). Ebben a mappában ne indítsd el a backendet és a webszervert: az élő `.env` fájllal az éjszakai feladatai az élő telepítés felhasználóinak küldenének levelet.
-4. Hasonlítsd össze a sorok számát az élő telepítéssel; futtasd mindkét mappában:
-   ```bash
-   docker compose exec -T db psql -U eto -d etofc -c "SELECT table_name, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), false, true, '')))[1]::text::int AS rows FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY 1"
-   ```
-5. A gyakorlás eltávolítása: `docker compose down -v` a mappájában, majd töröld a mappát.
-
-## 7. Felügyelet
-
-- **Elérhetőség:** egy külső figyelő (UptimeRobot vagy a szolgáltatóé) figyelje a `https://<cím>/health` címet, és `{"status":"ok"}` választ várjon. Ez azt mutatja, hogy a backend fut, az adatbázist nem vizsgálja. Az 5 percenként ellenőrző figyelő a rövid kieséseket, például egy frissítés újraindítását, nem veszi észre, és a riasztása akár 5 percet is késhet.
-- **Levelezőfiók:** egyes levelezőszolgáltatások értesítés nélkül letiltják az egy ideig nem használt SMTP hozzáférést. Az üzemeltetőnek szóló hibalevelek ugyanezen a fiókon mennek, így ezt semmi sem jelzi. Hosszabb csendes időszak, például a nyári szünet után küldj egy próbameghívót.
-- **Mentések:** a `backups/` legújabb fájlja legyen 26 óránál fiatalabb:
-  ```bash
-  find backups -name 'etofc-*.dump.age' -mmin -1560 | grep -q . || echo "no recent backup"
-  ```
-- **Háttérfeladatok:** egy sikertelen éjszakai feladat levelet küld az üzemeltető címére.
-- **Naplók:** `docker compose logs --tail 200 backend`. Minden szolgáltatás három 10 MB-os naplófájlt tart meg.
-
-## 8. Karbantartási feladatok
-
-**A nyilvános cím megváltoztatása**
-1. Írd az új címet a `.env` fájl `FRONTEND_URL` és `OUTLOOK_REDIRECT_URI` sorába.
-2. Módosítsd az átirányítási URI-t az Azure alkalmazásregisztrációban.
-3. Frissítsd a proxyt.
-4. Futtasd: `docker compose up -d`.
-
-**Háttérfeladat kézi futtatása.** A feladatok: `outlook-token-health`, `outlook-repair`, `outlook-prune`, `mlsz-refresh` és `dorm-digest`:
-```bash
-docker compose exec backend node dist/src/jobs/cli.js mlsz-refresh
-```
-
-**A PostgreSQL 16 támogatása 2028 novemberéig tart.** Az újabb főverzióra váltás alkalmazáskiadásként érkezik, hozzá illő mentési képfájllal. A menete:
-1. Készíts mentést, és ellenőrizd (6.4).
-2. Futtasd: `docker compose down`.
-3. Futtasd: `docker volume rm etofc_pg_data`.
-4. Telepítsd a kiadást.
-5. Futtasd: `docker compose up -d db backup`.
-6. Állítsd vissza (6.5).
-7. Futtasd: `docker compose up -d`.
-
-## 9. Hibaelhárítás
-
-| Jelenség | Ok |
-| --- | --- |
-| A `docker compose` leáll ezzel: „... nincs megadva a .env fájlban" | A `.env` ezen sora hiányzik vagy üres |
-| A backend újra és újra elindul, a naplóban „Hibás éles konfiguráció" | A naplósor megnevezi a hibás `.env` értéket |
-| Minden belépés és mentés 403-mal hiúsul meg | A `FRONTEND_URL` nem pontosan a böngészőben lévő cím (séma, hoszt és port, perjel nélkül a végén) |
-| Sima HTTP-n nem marad meg a bejelentkezés | A munkamenet sütik csak HTTPS-en működnek. Használd a proxy HTTPS címét |
-| Egyszerre mindenki „Túl sok kérés" üzenetet kap, kevés felhasználónál is | A `TRUST_PROXY_HOPS` kisebb, mint a proxyk száma plusz egy, így minden felhasználó egy közös korláton osztozik |
-| Egy közös címről (a klub wifije) csatlakozók csúcsidőben „Túl sok kérés" üzenetet kapnak | A korlát címenként 15 percenként 5000 kérés. Emelhető: `RATE_LIMIT_GLOBAL_MAX=<n>` a `.env` fájlban, majd `docker compose up -d` |
-| Az alaprajz vagy a PDF feltöltése nem sikerül | A proxy kéréstörzs-korlátja 10 MB alatt van |
-| A véglegesítés folyamatjelzője megáll, majd ugrik | A proxy puffereli a `text/event-stream` választ |
-| Nem érkeznek e-mailek | `docker compose logs backend`. Ellenőrizd a feladói domain SPF és DKIM rekordjait is az SMTP szolgáltatáshoz |
-| Egy meghívó küldése fél percig tart, majd sikertelen | A szolgáltató tiltja az SMTP portot. Próbáld ki az 1. fejezet szerint, és használd a levelezőszolgáltatás másik portját |
-| A levelek a levélszemétbe kerülnek | Lásd a levelezőszolgáltatás követelményeit az 1. fejezetben |
-| A 6.4 `docker run` parancsa „unauthorized" hibával leáll | Az a gép nincs bejelentkezve a `ghcr.io`-ba (2. fejezet, 1. lépés) |
-| A `docker volume ls` egy név nélküli kötetet is mutat az `etofc_pg_data` mellett | A mentési szolgáltatás saját, üres kötete. Ártalmatlan. `docker compose down -v` után a `docker volume prune` eltávolítja a megmaradt név nélküli köteteket, a nevesítetteket soha nem érinti |
-| Az API hívások `up -d` után néhány másodpercig 502-vel hiúsulnak meg | A backend még indul. Akkor válaszol, amikor a `docker compose ps` `healthy` állapotot mutat |
-| `[pdf]` sorok a naplóban a Chromium homokozójáról | Konténerben ez várható. A PDF-ek így is elkészülnek |
-
-## 10. Titkok
-
-Minden titok a `.env` fájlban van, amelyet csak a tulajdonosa olvashat. Ne módosíts egy értéket, hacsak ez a táblázat nem mondja, hogy biztonságos.
-
-| Érték | Mit okoz a módosítása |
-| --- | --- |
-| `JWT_SECRET` | Bármikor biztonságos. Mindenki kijelentkezik |
-| `OUTLOOK_STATE_SECRET` | Bármikor biztonságos. Az utolsó 10 percben indított Outlook csatlakozás meghiúsul, és újrapróbálható |
-| `TWO_FACTOR_ENCRYPTION_KEY` | **Soha ne módosítsd, és ne veszítsd el.** Minden kétlépcsős azonosítást használó kizáródik |
-| `OUTLOOK_TOKEN_ENCRYPTION_KEY` | Minden csatlakozott felhasználónak újra kell csatlakoztatnia az Outlookot |
-| `BACKUP_ENCRYPTION_KEY` | Az új mentések az új kulcsot használják. A régi kulcsot addig őrizd meg, amíg vele készült mentés létezik |
-| `POSTGRES_PASSWORD` | Futtasd: `docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD '<új>'"`, majd ugyanezt az értéket írd a `.env` fájlba, és futtasd: `docker compose up -d` |
-| `SMTP_PASS` | A levelezőszolgáltató adja. Előbb ott módosítsd, aztán a `.env` fájlban |
-| `OUTLOOK_CLIENT_SECRET` | Lásd a 4.2-t |

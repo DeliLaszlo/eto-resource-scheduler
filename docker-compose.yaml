@@ -42,12 +42,12 @@ services:
       OUTLOOK_STATE_SECRET: ${OUTLOOK_STATE_SECRET:?Az OUTLOOK_STATE_SECRET nincs megadva a .env fájlban}
       OUTLOOK_TOKEN_ENCRYPTION_KEY: ${OUTLOOK_TOKEN_ENCRYPTION_KEY:?Az OUTLOOK_TOKEN_ENCRYPTION_KEY nincs megadva a .env fájlban}
       TWO_FACTOR_ENCRYPTION_KEY: ${TWO_FACTOR_ENCRYPTION_KEY:?A TWO_FACTOR_ENCRYPTION_KEY nincs megadva a .env fájlban}
-      SMTP_HOST: ${SMTP_HOST:?Az SMTP_HOST nincs megadva a .env fájlban}
-      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:?Az EMAIL_FROM_ADDRESS nincs megadva a .env fájlban}
-      MAINTAINER_EMAIL: ${MAINTAINER_EMAIL:?A MAINTAINER_EMAIL nincs megadva a .env fájlban}
       CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
       EMAIL_SINGLE_RECIPIENT: "false"
       SCHEDULER_ENABLED: "true"
+      BACKUP_DIR: /backups
+    volumes:
+      - ./backups:/backups:ro
     stop_grace_period: 20s
     logging: *logging
 
@@ -64,7 +64,6 @@ services:
       PGDATABASE: ${POSTGRES_DB}
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?A BACKUP_ENCRYPTION_KEY nincs megadva a .env fájlban}
       BACKUP_DIR: /backups
-      BACKUP_KEEP: "14"
       BACKUP_CRON: "0 1 * * *"
     volumes:
       - ./backups:/backups
@@ -82,5 +81,26 @@ services:
       - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-3000}:80"
     logging: *logging
 
+  proxy:
+    image: caddy:2.11.3-alpine
+    profiles:
+      - https
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    environment:
+      FRONTEND_URL: ${FRONTEND_URL:?A FRONTEND_URL nincs megadva a .env fájlban}
+      CADDY_TRUSTED_PROXIES: ${CADDY_TRUSTED_PROXIES:-127.0.0.1/32}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
 volumes:
   pg_data:
+  caddy_data:
+  caddy_config:
