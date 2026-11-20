@@ -1,4 +1,6 @@
-# Az eto.example.hu helyére a valódi cím, a 3000 helyére a .env HTTP_PORT értéke
+# Minta nginx beállítás egy már futó saját HTTPS proxyhoz.
+# Az eto.example.hu helyére a valódi cím, a 3000 helyére a .env HTTP_PORT értéke.
+
 server {
     listen 80;
     listen [::]:80;

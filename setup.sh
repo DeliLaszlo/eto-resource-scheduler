@@ -1,4 +1,7 @@
 #!/bin/sh
+# Első telepítés a szerveren: Docker, kérdések, .env, tűzfal, indítás, mentés visszaállítása,
+# üzemeltetői fiók, majd várakozás a HTTPS-re.
+
 set -eu
 
 cd "$(dirname "$0")"

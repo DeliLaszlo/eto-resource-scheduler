@@ -1,4 +1,5 @@
-# A kit saját HTTPS proxyja: a cím és a megbízható proxyk a .env fájlból jönnek
+# A csomag saját HTTPS proxyja, a cím és a megbízható proxyk a .env fájlból jönnek.
+
 {
 	servers {
 		protocols h1 h2

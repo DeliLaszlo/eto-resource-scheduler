@@ -98,32 +98,42 @@ Az Outlook beállításai a Beállítások, Outlook alatt vannak. Az Outlook-szi
 
 Mentés előtt a konzol az Azure-nál ellenőrzi az azonosítót és a titkot. A titok lejárata előtt a konzol e-mailt küld. Az új titok az 5. lépéssel készül, és ugyanebbe a két mezőbe kerül.
 
+### Külső rendszerek
+
+Más rendszer a külső API-n keresztül olvashatja a véglegesített heti programot. Az API csak olvasható, a leírása az [API.hu.md](API.hu.md) fájlban van.
+
+Minden külső rendszer saját kulcsot kap az API kulcsok kártyán, az Új API kulcs gombbal. A konzol a kulcsot csak egyszer mutatja meg, ezért akkor kell átadni. A kulcs törlése ugyanezen a kártyán azonnal kizárja az adott rendszert. A kártya mutatja, hogy az egyes kulcsokat mikor használták utoljára.
+
 ## 4. Mentések
 
 Az adatbázisról minden éjjel 02:00-kor, nyári időszámítás idején 03:00-kor mentés készül. A mentéseket a `BACKUP_ENCRYPTION_KEY` titkosítja. A szerver 14 napig őrzi meg őket, egyszerre legfeljebb 21-et. A konzol Mentések oldalán igény szerint is készíthető mentés, és ott minden mentés letölthető.
 
 ### Felhőmásolat
 
-A szerveren lévő mentés a szerverrel együtt elvész. Ezért a konzol minden éjjel 03:40-kor feltölti az új mentéseket egy S3-kompatibilis tárhelyre, hetente legfeljebb 14-et. A beállítások a Beállítások, Felhőmásolat alatt vannak. A példa a Backblaze B2, mert az első 10 GB ingyenes, és ez elég a klub mentéseihez.
+A szerveren lévő mentés a szerverrel együtt elvész. Ezért a konzol minden éjjel 03:40-kor feltölti az új mentéseket egy S3-kompatibilis tárhelyre, hetente legfeljebb 14-et. A beállítások a Beállítások, Felhőmásolat alatt vannak.
+
+A tárhelynek három beállítás kell. Object Lock zárolás 6 napos alapértelmezett megőrzéssel, így 6 napig senki sem törölheti a mentést, ellopott kulccsal sem. Egy életciklus-szabály, amely a zárolás lejárta után egy nappal törli a mentéseket, így minden mentés a feltöltés után 7 nappal eltűnik. Egy kulcs, amely ebbe az egy tárolóba feltölteni tud, törölni nem. Bármely S3-kompatibilis tárhely megfelel, amely így beállítható.
+
+A példa a Backblaze B2, mert az első 10 GB ingyenes, és ez elég a klub mentéseihez. A Backblaze regisztrációkor csak amerikai és kanadai régiót kínál, ezért ez a példa nem az EU-ban tárolja a mentéseket. Egy EU-s régiójú, ugyanígy beállított S3-kompatibilis tárhely az EU-ban tartja őket. Amerikai régiónál a klubnak adattovábbítási jogalap kell, például a szolgáltató adatfeldolgozási szerződésében szereplő általános szerződési feltételek.
 
 A Backblaze B2 tárhely a következő lépésekkel készül.
 
-1. Regisztráció a `backblaze.com` oldalon EU Central régióval. A régió csak a regisztrációkor választható, és ezzel a klub adatai az EU-ban maradnak.
+1. Regisztráció a `backblaze.com` oldalon. A régió csak a regisztrációkor választható.
 2. Buckets, Create a Bucket. Egyedi név, például `eto-mentesek`, Files in Bucket Private, Object Lock Enable.
-3. A tároló Object Lock beállítása, 7 napos alapértelmezett megőrzéssel. Így egy hétig senki sem törölheti a mentést, ellopott kulccsal sem.
-4. A tároló Lifecycle Settings beállítása, egyéni szabállyal. Days till hide 8, days till delete 1. Így a zárolás lejárta után a régi mentések nem halmozódnak fel.
-5. Application Keys, Add a New Application Key. Hozzáférés csak ehhez a tárolóhoz, Write Only típussal. Így a szerver feltölteni tud, törölni nem. A kulcsot a Backblaze csak egyszer mutatja meg.
+3. A tároló Object Lock beállítása, 6 napos alapértelmezett megőrzéssel.
+4. A tároló Lifecycle Settings beállítása, egyéni szabállyal. Days till hide 6, days till delete 1.
+5. Application Keys, Add a New Application Key. Hozzáférés csak ehhez a tárolóhoz, Write Only típussal. A kulcsot a Backblaze csak egyszer mutatja meg.
 
 | Mező | Példa | Megjegyzés |
 | --- | --- | --- |
-| S3 végpont | `https://s3.eu-central-003.backblazeb2.com` | A tárolók listájában látható Endpoint, `https://` előtaggal |
-| Régió | `eu-central-003` | A végpont középső része |
+| S3 végpont | `s3.us-east-005.backblazeb2.com` | A tárolók listájában látható Endpoint |
+| Régió | `us-east-005` | A végpont középső része |
 | Tároló neve | `eto-mentesek` | |
 | Mappa a tárolóban | `etofc` | Opcionális. Üresen a tároló gyökerébe tölt fel |
-| Kulcsazonosító | `0031a2b3c4d5e6f0000000001` | Az új kulcs keyID értéke |
+| Kulcsazonosító | `0051a2b3c4d5e6f0000000001` | Az új kulcs keyID értéke |
 | Titkos kulcs | | Az új kulcs applicationKey értéke |
 
-Mentés előtt a konzol egy próbafájlt tölt fel a tárolóba.
+Mentés előtt a konzol egy próbafájlt tölt fel a tárolóba. A zárolás a próbafájlt is 6 napig megtartja.
 
 ### Mentés visszaállítása
 
@@ -208,6 +218,7 @@ A futó alkalmazás hibái a konzol Rendszernapló oldalán jelennek meg.
 | Mindenki „Túl sok kérés” hibát kap | A klub hálózata egy közös címet használ | A korlát emelése a Beállítások, Kéréskorlát alatt |
 | Leállt az Outlook-szinkron | Lejárt az Azure titok | Új titok készítése az Entra felügyeleti központban és megadása a konzolon, lásd a 3. részt |
 | Egy klubadmin elvesztette a telefonját vagy a jelszavát | | Klub adminok, Helyreállítás. Az admin jelszó-visszaállító linket kap |
+| Egy külső rendszer 401 hibát kap | Az API kulcsa hibás, vagy törölték | Új kulcs az API kulcsok kártyán, majd a kulcs átadása |
 | Az üzemeltető elvesztette a telefonját | | A belépési oldal „Nem tudsz bejelentkezni?” linkje e-mailt küld, amely kikapcsolja a kétlépcsős azonosítást |
 | Az üzemeltető a jelszavát és a telefonját is elvesztette | | Az alábbi parancs |
 
@@ -246,3 +257,53 @@ cd /opt/etofc
 sudo docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD 'UJ_JELSZO'"
 sudo docker compose up -d
 ```
+
+## 9. Személyes adatok
+
+Az alkalmazás a klub munkatársainak, a meghívottaknak, a kollégiumi lakóknak és a tárgyalófoglalások résztvevőinek személyes adatait tárolja.
+
+### Megőrzési idők
+
+Az alkalmazás minden éjjel 03:20-kor törli a lejárt adatokat. A konzol Ütemezett feladatok kártyáján ez a Megőrzési időn túli adatok törlése sor.
+
+| Adat | Megőrzés | Megjegyzés |
+| --- | --- | --- |
+| Tevékenységnapló | 365 nap | |
+| Kollégiumi lakó | A kiköltözés után 365 nap | |
+| Fel nem használt meghívó | A lejárat után 30 nap | |
+| Visszajelzés | 365 nap | |
+| Tárgyalófoglalás résztvevőinek címei | A foglalás után 365 nap | Maga a foglalás megmarad |
+| Események, pálya- és tárgyalófoglalások, mentett heti programok | 3 év | |
+| Rendszernapló | 90 nap | |
+| Mentés a szerveren | 14 nap | |
+| Mentés a felhőtárhelyen | 7 nap | 6 napig zárolva, utána az életciklus-szabály törli |
+| Webszerver napló | 30 MB | Három 10 MB-os fájl. Új fájl kezdésekor a legrégebbi törlődik |
+| Felhasználói fiók | Amíg a klub nem törli | |
+
+### Adatátadás külső szolgáltatóknak
+
+| Szolgáltató | Milyen személyes adatot kap | Mikor |
+| --- | --- | --- |
+| Tárhelyszolgáltató | Minden, ami a szerveren van | Mindig |
+| Levelezési szolgáltató | Az e-mailek címzettjei és tartalma | Minden e-mailnél |
+| Mentési tárhely | Titkosított adatbázismentések | Ha a felhőmásolat be van állítva |
+| Microsoft | Az Outlookot összekötő felhasználók eseményei és foglalásai | Csak ezeknél a felhasználóknál |
+| MLSZ, `adatbank.mlsz.hu` | A látogató IP-címe | Amikor a böngésző egy csapatcímert tölt be |
+
+### Adatkezelési tájékoztató
+
+Amíg nincs közzétett adatkezelési tájékoztató, az alkalmazás senkitől sem kér megerősítést. Addig nincs jelölőnégyzet a regisztrációnál, nincs hivatkozás a bejelentkezési oldalon, és az e-mailekben sincs róla sor.
+
+A tájékoztató a konzolon, a Beállítások, Adatkezelési tájékoztató résznél tehető közzé. A szerkesztő egy sablonnal indul, amely felsorolja, mit tárol az alkalmazás. Közzététel előtt a sablont jogásznak kell átnéznie és kiegészítenie. Közzétett tájékoztató nem törölhető. A módosított szöveg mentése új változatot tesz közzé, a régi változatok ugyanott olvashatók maradnak.
+
+Minden új változat után minden felhasználó a következő bejelentkezésekor megerősíti a tájékoztatót. Új felhasználó a regisztrációkor erősíti meg.
+
+### Hozzáférési és törlési kérelmek
+
+Ha valaki kéri a róla tárolt adatokat vagy azok törlését, a konzol Személyes adatok keresése kártyáján a neve vagy az e-mail címe alapján megkereshetők.
+
+Egy név több személyé is lehet. Egy azonos nevű munkatárs és kollégiumi lakó egyaránt megjelenik a találatok között. Ezért minden sornak saját jelölőnégyzete van, és a kérelmező sorait egyenként kell kijelölni. A Kijelöltek letöltése csak a kijelölt sorokat menti egy PDF fájlba, az Összes letöltése minden találatot. A fájlt elküldés előtt át kell olvasni.
+
+A Kijelöltek törlése az üzemeltető jelszavával törli a kijelölt sorokat. Egy felhasználói fiókkal együtt minden hozzá tartozó adat törlődik. Az utolsó adminisztrátor nem törölhető. A törlés végleges, de a mentések a lejáratukig megőrzik a törölt adatokat.
+
+Minden keresés és minden törlés egy sort ír a rendszernaplóba, csak a sorok számával, a keresett név nélkül.

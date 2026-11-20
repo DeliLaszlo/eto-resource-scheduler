@@ -98,32 +98,42 @@ The Outlook settings are under Settings, Outlook. The Outlook sync needs an app 
 
 Before saving, the console checks the ID and the secret with Azure. The console sends an e-mail before the secret expires. A new secret is made with step 5 and entered in the same two fields.
 
+### External systems
+
+Another system can read the finalized weekly programme through the external API. The API is read-only and is described in [API.md](API.md).
+
+Each external system gets its own key on the API keys card, with the New API key button. The console shows the key only once, so it has to be handed over right then. Deleting a key on the same card cuts that system off at once. The card shows when each key was last used.
+
 ## 4. Backups
 
 The database is backed up every night at 02:00 Hungarian time, or 03:00 in summer time. The backups are encrypted with `BACKUP_ENCRYPTION_KEY`. The server keeps them for 14 days, at most 21 at a time. The Backups page of the console can make a backup on demand, and every backup can be downloaded there.
 
 ### Off-site copy
 
-A backup on the server is lost with the server. So at 03:40 every night the console uploads the new backups to an S3-compatible storage, at most 14 in a week. The settings are under Settings, Off-site copy. The example here is Backblaze B2, because its first 10 GB are free, and that is enough for the club's backups.
+A backup on the server is lost with the server. So at 03:40 every night the console uploads the new backups to an S3-compatible storage, at most 14 in a week. The settings are under Settings, Off-site copy.
+
+The storage needs three settings. Object Lock with a default retention of 6 days, so nobody can delete a backup for 6 days, not even with a stolen key. A lifecycle rule that removes backups a day after the lock expires, so every backup is gone 7 days after the upload. A key that can upload to this one bucket but cannot delete. Any S3-compatible storage with these settings works.
+
+The example here is Backblaze B2, because its first 10 GB are free, and that is enough for the club's backups. Backblaze offers only US and Canadian regions at sign-up, so this example does not store the backups in the EU. An S3-compatible storage with an EU region and the same settings keeps them in the EU. A US region needs a transfer basis for the club, such as the standard contractual clauses in the provider's data processing agreement.
 
 The Backblaze B2 storage is set up with these steps.
 
-1. Sign up at `backblaze.com` with region EU Central. The region can only be chosen at sign-up, and it keeps the club's data in the EU.
+1. Sign up at `backblaze.com`. The region can only be chosen at sign-up.
 2. Buckets, Create a Bucket. A unique name such as `eto-mentesek`, Files in Bucket Private, Object Lock Enable.
-3. The bucket's Object Lock setting, default retention 7 days. Nobody can delete a backup for a week, not even with a stolen key.
-4. The bucket's Lifecycle Settings, custom rule. Days till hide 8, days till delete 1. Old backups do not pile up after the lock expires.
-5. Application Keys, Add a New Application Key. Access to this bucket only, type of access Write Only. The server can upload but cannot delete. Backblaze shows the key only once.
+3. The bucket's Object Lock setting, default retention 6 days.
+4. The bucket's Lifecycle Settings, custom rule. Days till hide 6, days till delete 1.
+5. Application Keys, Add a New Application Key. Access to this bucket only, type of access Write Only. Backblaze shows the key only once.
 
 | Field | Example | Note |
 | --- | --- | --- |
-| S3 endpoint | `https://s3.eu-central-003.backblazeb2.com` | The Endpoint shown in the bucket list, with `https://` in front |
-| Region | `eu-central-003` | The middle part of the endpoint |
+| S3 endpoint | `s3.us-east-005.backblazeb2.com` | The Endpoint shown in the bucket list |
+| Region | `us-east-005` | The middle part of the endpoint |
 | Bucket name | `eto-mentesek` | |
 | Folder in the bucket | `etofc` | Optional. Empty uploads to the bucket's root |
-| Key ID | `0031a2b3c4d5e6f0000000001` | The keyID of the new key |
+| Key ID | `0051a2b3c4d5e6f0000000001` | The keyID of the new key |
 | Secret key | | The applicationKey of the new key |
 
-Before saving, the console uploads a test file to the bucket.
+Before saving, the console uploads a test file to the bucket. The lock keeps the test file for 6 days too.
 
 ### Restoring a backup
 
@@ -208,6 +218,7 @@ Errors of the running app are on the console's System log page.
 | Everybody gets a "Túl sok kérés" error | The club's network shares one address | Raise the limit in Settings, Rate limit |
 | The Outlook sync stopped | The Azure secret expired | Make a new secret in the Entra admin center and enter it, see section 3 |
 | A club admin lost their phone or password | | Club admins, Recover. The admin gets a password reset link |
+| An external system gets a 401 error | Its API key is wrong or was deleted | Create a new key on the API keys card and hand it over |
 | The operator lost their phone | | The "Nem tudsz bejelentkezni?" link on the login page sends an e-mail that turns off two-step login |
 | The operator lost both password and phone | | The command below |
 
@@ -246,3 +257,53 @@ cd /opt/etofc
 sudo docker compose exec db psql -U eto -d etofc -c "ALTER ROLE eto WITH PASSWORD 'UJ_JELSZO'"
 sudo docker compose up -d
 ```
+
+## 9. Personal data
+
+The app stores the personal data of the club's staff, invitees, dormitory residents and meeting attendees.
+
+### Storage periods
+
+The app deletes the expired data every night at 03:20 Hungarian time. On the console's Scheduled jobs card this is the Delete data past its retention period row.
+
+| Data | Kept for | Note |
+| --- | --- | --- |
+| Activity log | 365 days | |
+| Dormitory resident | 365 days after moving out | |
+| Unused invitation | 30 days after it expires | |
+| Feedback | 365 days | |
+| Attendee addresses of a meeting room booking | 365 days after the booking | The booking itself stays |
+| Events, pitch and meeting room bookings, saved weekly programmes | 3 years | |
+| System log | 90 days | |
+| Backup on the server | 14 days | |
+| Backup on the cloud storage | 7 days | Locked for 6 days, then the lifecycle rule deletes it |
+| Web server log | 30 MB | Three files of 10 MB. The oldest is deleted when a new one starts |
+| User account | Until the club deletes it | |
+
+### Data shared with external services
+
+| Service | Personal data it receives | When |
+| --- | --- | --- |
+| Hosting provider | Everything on the server | Always |
+| Mail provider | The addresses and the content of the e-mails | With every e-mail |
+| Backup storage | Encrypted database backups | When the off-site copy is set up |
+| Microsoft | The events and bookings of the users who connected Outlook | Only for these users |
+| MLSZ, `adatbank.mlsz.hu` | The visitor's IP address | When the browser loads a team crest |
+
+### Privacy notice
+
+The app asks nobody to confirm anything until a privacy notice is published. Until then there is no tickbox at registration, no link on the login page and no line about it in the e-mails.
+
+The notice is published in the console, under Settings, Privacy notice. The editor starts from a template that lists what the app stores. A lawyer reviews and completes the template before it is published. A published notice cannot be deleted. Saving a changed text publishes a new version, and the old versions stay readable on the same card.
+
+After every new version, each user confirms the notice at their next login. A new user confirms it at registration.
+
+### Access and erasure requests
+
+When somebody asks for the data stored about them or for its deletion, the console's Personal data search card finds it by their name or e-mail address.
+
+A name can belong to more than one person. A staff member and a dormitory resident with the same name both appear in the results. So every row has its own checkbox, and the rows of the requesting person are ticked one by one. Download selected saves only the ticked rows into one PDF file, Download all saves every hit. The file is read before it is sent to the person.
+
+Delete selected deletes the ticked rows after the operator's password. Deleting a user account deletes everything that belongs to it. The last admin cannot be deleted. The deletion is final, but the backups keep the deleted data until they expire.
+
+Every search and every deletion writes one line to the system log, with the number of rows only, without the searched name.

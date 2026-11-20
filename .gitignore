@@ -1,3 +1,5 @@
+# A telepítőcsomag Gitből kimaradó fájljai: .env, mentések, kezdő adatok.
+
 .env
 .env.tmp
 /backups/

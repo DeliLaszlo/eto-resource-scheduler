@@ -1,4 +1,6 @@
-# Az eto.example.hu helyére a valódi cím, a 3000 helyére a .env HTTP_PORT értéke
+# Minta Caddy beállítás egy már futó saját HTTPS proxyhoz.
+# Az eto.example.hu helyére a valódi cím, a 3000 helyére a .env HTTP_PORT értéke.
+
 eto.example.hu {
 	request_body {
 		max_size 10MB

@@ -1,3 +1,5 @@
+# A telepített rendszer: adatbázis, backend, mentés, webalkalmazás, https profillal a Caddy proxy.
+
 name: etofc
 
 x-logging: &logging

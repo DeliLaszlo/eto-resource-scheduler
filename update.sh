@@ -1,4 +1,6 @@
 #!/bin/sh
+# Frissítés a szerveren: a csomag a célverzióra vált, majd letöltés, mentés és indítás az új verzióval.
+
 set -eu
 
 cd "$(dirname "$0")"
